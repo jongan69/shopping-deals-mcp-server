@@ -64,6 +64,13 @@ class Settings:
         if site.strip()
     )
     enable_amazon_scrape: bool = _env_bool("SHOPPING_ENABLE_AMAZON_SCRAPE", False)
+    facebook_marketplace_latitude: float | None = _env_optional_float(
+        "SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE"
+    )
+    facebook_marketplace_longitude: float | None = _env_optional_float(
+        "SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE"
+    )
+    facebook_marketplace_radius_km: int = _env_int("SHOPPING_FACEBOOK_MARKETPLACE_RADIUS_KM", 16)
     http_timeout_seconds: float = _env_float("SHOPPING_HTTP_TIMEOUT_SECONDS", 15.0)
     max_results_per_source: int = _env_int("SHOPPING_MAX_RESULTS_PER_SOURCE", 25)
     estimated_tax_rate_percent: float | None = _env_optional_float(

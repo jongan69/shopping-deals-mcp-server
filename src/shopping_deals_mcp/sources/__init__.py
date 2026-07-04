@@ -8,6 +8,7 @@ from shopping_deals_mcp.sources.base import MarketplaceSource
 from shopping_deals_mcp.sources.craigslist import CraigslistSource
 from shopping_deals_mcp.sources.ebay import EbaySource
 from shopping_deals_mcp.sources.ebay_public import EbayPublicSearchSource
+from shopping_deals_mcp.sources.facebook_marketplace import FacebookMarketplaceSource
 from shopping_deals_mcp.sources.offerup import OfferUpSource
 from shopping_deals_mcp.sources.serpapi import SerpApiGoogleShoppingSource
 
@@ -17,6 +18,7 @@ def build_sources() -> dict[str, MarketplaceSource]:
         SerpApiGoogleShoppingSource(settings),
         EbaySource(settings),
         EbayPublicSearchSource(settings),
+        FacebookMarketplaceSource(settings),
         CraigslistSource(settings),
         OfferUpSource(settings),
         AmazonSearchSource(settings),

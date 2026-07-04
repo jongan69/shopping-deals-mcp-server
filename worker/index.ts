@@ -15,6 +15,9 @@ type Env = {
   SHOPPING_MAX_RESULTS_PER_SOURCE?: string;
   SHOPPING_ESTIMATED_TAX_RATE_PERCENT?: string;
   SHOPPING_TAX_SHIPPING?: string;
+  SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE?: string;
+  SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE?: string;
+  SHOPPING_FACEBOOK_MARKETPLACE_RADIUS_KM?: string;
 };
 
 type Listing = {
@@ -49,7 +52,10 @@ type SearchResponse = {
   listings: Listing[];
 };
 
-const SOURCE_NAMES = ["ebay", "craigslist", "offerup", "amazon"] as const;
+const SOURCE_NAMES = ["ebay", "facebook_marketplace", "craigslist", "offerup", "amazon"] as const;
+const FACEBOOK_GRAPHQL_URL = "https://www.facebook.com/api/graphql/";
+const FACEBOOK_MARKETPLACE_SEARCH_DOC_ID = "7111939778879383";
+const FACEBOOK_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 const ACCESSORY_TERMS = new Set([
   "adapter",
   "accessories",
@@ -306,6 +312,15 @@ function listSources(env: Env) {
       notes: "Uses the official eBay Browse API.",
     },
     {
+      name: "facebook_marketplace",
+      display_name: "Facebook Marketplace",
+      available: true,
+      requires: facebookCoordinates(env) ? [] : [
+        "location as latitude,longitude or SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE/LONGITUDE",
+      ],
+      notes: "Experimental public Facebook Marketplace parser. Requires a local search center and may fail if Facebook changes or blocks anonymous Marketplace requests.",
+    },
+    {
       name: "craigslist",
       display_name: "Craigslist",
       available: true,
@@ -351,6 +366,19 @@ async function searchProducts(
     try {
       if (source === "ebay") {
         return { source, listings: await ebaySearch(env, options.query, limit, options.priceMin, options.priceMax) };
+      }
+      if (source === "facebook_marketplace") {
+        return {
+          source,
+          listings: await facebookMarketplaceSearch(
+            env,
+            options.query,
+            limit,
+            options.location,
+            options.priceMin,
+            options.priceMax,
+          ),
+        };
       }
       if (source === "craigslist") {
         return { source, listings: await craigslistSearch(env, options.query, limit, options.priceMin, options.priceMax) };
@@ -530,6 +558,132 @@ async function amazonSearch(env: Env, query: string, limit: number, priceMin?: n
       condition: "new",
       image_url: decodeHtml(match(card, /<img[^>]+class="[^"]*s-image[^"]*"[^>]+src="([^"]+)"/)) || null,
       seller: "Amazon",
+    });
+    if (listings.length >= limit) break;
+  }
+  return listings;
+}
+
+async function facebookMarketplaceSearch(
+  env: Env,
+  query: string,
+  limit: number,
+  location?: string,
+  priceMin?: number,
+  priceMax?: number,
+): Promise<Listing[]> {
+  const coordinates = facebookCoordinates(env, location);
+  if (!coordinates) return [];
+
+  const headers = facebookHeaders();
+  const { token, referer } = await facebookLsdToken(env, query, headers);
+  const variables = {
+    count: Math.max(1, Math.min(limit, 24)),
+    params: {
+      bqf: { callsite: "COMMERCE_MKTPLACE_WWW", query },
+      browse_request_params: {
+        commerce_enable_local_pickup: true,
+        commerce_enable_shipping: true,
+        commerce_search_and_rp_available: true,
+        commerce_search_and_rp_condition: null,
+        commerce_search_and_rp_ctime_days: null,
+        filter_location_latitude: coordinates.latitude,
+        filter_location_longitude: coordinates.longitude,
+        filter_price_lower_bound: 0,
+        filter_price_upper_bound: 214748364700,
+        filter_radius_km: intEnv(env.SHOPPING_FACEBOOK_MARKETPLACE_RADIUS_KM, 16),
+      },
+      custom_request_params: { surface: "SEARCH" },
+    },
+  };
+  const response = await timedFetch(env, FACEBOOK_GRAPHQL_URL, {
+    method: "POST",
+    headers: {
+      ...headers,
+      Accept: "*/*",
+      "Content-Type": "application/x-www-form-urlencoded",
+      Origin: "https://www.facebook.com",
+      Referer: referer,
+      "x-fb-lsd": token,
+    },
+    body: new URLSearchParams({
+      av: "0",
+      __user: "0",
+      __a: "1",
+      __req: "1",
+      __comet_req: "15",
+      lsd: token,
+      jazoest: "21000",
+      fb_api_caller_class: "RelayModern",
+      fb_api_req_friendly_name: "CometMarketplaceSearchContentContainerQuery",
+      variables: JSON.stringify(variables),
+      server_timestamps: "true",
+      doc_id: FACEBOOK_MARKETPLACE_SEARCH_DOC_ID,
+    }),
+  });
+  if (!response.ok) throw new Error(`Facebook Marketplace search failed: HTTP ${response.status}`);
+  const payload = JSON.parse((await response.text()).replace(/^for \(;;\);/, ""));
+  if (payload.error) {
+    throw new Error(`Facebook Marketplace search failed: ${payload.errorSummary ?? payload.errorDescription ?? payload.error}`);
+  }
+  return parseFacebookMarketplace(payload, limit, priceMin, priceMax);
+}
+
+async function facebookLsdToken(env: Env, query: string, headers: Record<string, string>): Promise<{ token: string; referer: string }> {
+  const urls = [
+    `https://www.facebook.com/marketplace/nyc/search/?query=${encodeURIComponent(query)}`,
+    `https://www.facebook.com/marketplace/search/?query=${encodeURIComponent(query)}`,
+    "https://www.facebook.com/marketplace/",
+  ];
+  let lastStatus = "";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (const url of urls) {
+      const response = await timedFetch(env, url, { headers, redirect: "follow" });
+      if (!response.ok) {
+        lastStatus = `HTTP ${response.status} from ${url}`;
+        continue;
+      }
+      const token = extractFacebookLsdToken(await response.text());
+      lastStatus = `HTTP ${response.status} from ${response.url}`;
+      if (token) return { token, referer: response.url };
+    }
+  }
+  throw new Error(`Facebook Marketplace search token was not present in public page (${lastStatus}).`);
+}
+
+function parseFacebookMarketplace(data: Record<string, unknown>, limit: number, priceMin?: number, priceMax?: number): Listing[] {
+  const root = objectValue(data.data);
+  const search = objectValue(root?.marketplace_search);
+  const feed = objectValue(search?.feed_units);
+  const edges = Array.isArray(feed?.edges) ? feed.edges : [];
+  const listings: Listing[] = [];
+  const seen = new Set<string>();
+
+  for (const edge of edges) {
+    const node = objectValue(objectValue(edge)?.node);
+    if (node?.__typename !== "MarketplaceFeedListingStoryObject") continue;
+    const item = objectValue(node.listing);
+    if (!item) continue;
+    const id = String(item.id ?? "").trim();
+    const title = String(item.marketplace_listing_title ?? item.title ?? "").trim();
+    if (!id || !title || seen.has(id)) continue;
+    seen.add(id);
+    const price = facebookListingPrice(item);
+    if (price !== null && priceMin !== undefined && price < priceMin) continue;
+    if (price !== null && priceMax !== undefined && price > priceMax) continue;
+    listings.push({
+      id,
+      source: "facebook_marketplace",
+      marketplace: "Facebook Marketplace",
+      title,
+      url: `https://www.facebook.com/marketplace/item/${id}`,
+      price,
+      currency: "USD",
+      condition: "used",
+      image_url: facebookListingImage(item),
+      location: facebookListingLocation(item),
+      shipping: item.is_shipping_offered ? "Shipping offered" : "Local pickup",
+      availability: item.is_pending ? "pending" : null,
     });
     if (listings.length >= limit) break;
   }
@@ -928,6 +1082,80 @@ function ebayShippingCost(item: Record<string, unknown>): number | null {
   return amount(objectValue(first?.shippingCost));
 }
 
+function facebookListingPrice(item: Record<string, unknown>): number | null {
+  const listingPrice = objectValue(item.listing_price);
+  const amountValue = parsePrice(listingPrice?.amount);
+  if (amountValue !== null) return amountValue / 100;
+  return parsePrice(listingPrice?.formatted_amount ?? item.price ?? item.currentPrice);
+}
+
+function facebookListingImage(item: Record<string, unknown>): string | null {
+  const photo = objectValue(item.primary_listing_photo);
+  const image = objectValue(photo?.image);
+  if (typeof image?.uri === "string") return image.uri;
+  if (typeof photo?.uri === "string") return photo.uri;
+  return null;
+}
+
+function facebookListingLocation(item: Record<string, unknown>): string | null {
+  const location = objectValue(item.location);
+  const reverse = objectValue(location?.reverse_geocode);
+  const reverseCity = objectValue(reverse?.city_page);
+  const city = objectValue(location?.city_page);
+  if (typeof reverseCity?.display_name === "string") return reverseCity.display_name;
+  if (typeof city?.display_name === "string") return city.display_name;
+  return typeof location?.single_line_address === "string" ? location.single_line_address : null;
+}
+
+function facebookCoordinates(env: Env, location?: string): { latitude: number; longitude: number } | null {
+  if (location) {
+    const found = location.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+    if (found) return { latitude: Number(found[1]), longitude: Number(found[2]) };
+    const city = cityCoordinates(location);
+    if (city) return city;
+  }
+  const latitude = Number.parseFloat(env.SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE ?? "");
+  const longitude = Number.parseFloat(env.SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE ?? "");
+  if (Number.isFinite(latitude) && Number.isFinite(longitude)) return { latitude, longitude };
+  return null;
+}
+
+function cityCoordinates(location: string): { latitude: number; longitude: number } | null {
+  const normalized = location.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const aliases: Record<string, { latitude: number; longitude: number }> = {
+    atlanta: { latitude: 33.7490, longitude: -84.3880 },
+    austin: { latitude: 30.2672, longitude: -97.7431 },
+    boston: { latitude: 42.3601, longitude: -71.0589 },
+    chicago: { latitude: 41.8781, longitude: -87.6298 },
+    dallas: { latitude: 32.7767, longitude: -96.7970 },
+    denver: { latitude: 39.7392, longitude: -104.9903 },
+    houston: { latitude: 29.7604, longitude: -95.3698 },
+    "las vegas": { latitude: 36.1716, longitude: -115.1391 },
+    "los angeles": { latitude: 34.0522, longitude: -118.2437 },
+    miami: { latitude: 25.7617, longitude: -80.1918 },
+    "new orleans": { latitude: 29.9511, longitude: -90.0715 },
+    "new york": { latitude: 40.7128, longitude: -74.0060 },
+    "new york city": { latitude: 40.7128, longitude: -74.0060 },
+    nyc: { latitude: 40.7128, longitude: -74.0060 },
+    philadelphia: { latitude: 39.9526, longitude: -75.1652 },
+    phoenix: { latitude: 33.4484, longitude: -112.0740 },
+    portland: { latitude: 45.5152, longitude: -122.6784 },
+    "san antonio": { latitude: 29.4252, longitude: -98.4946 },
+    "san diego": { latitude: 32.7157, longitude: -117.1611 },
+    "san francisco": { latitude: 37.7749, longitude: -122.4194 },
+    sfbay: { latitude: 37.7749, longitude: -122.4194 },
+    seattle: { latitude: 47.6062, longitude: -122.3321 },
+    "washington dc": { latitude: 38.9072, longitude: -77.0369 },
+  };
+  return aliases[normalized] ?? null;
+}
+
+function extractFacebookLsdToken(html: string): string {
+  return match(html, /"LSD",\[\],\{"token":"([^"]+)"/) ||
+    match(html, /name="lsd"\s+value="([^"]+)"/) ||
+    match(html, /"lsd"\s*:\s*"([^"]+)"/);
+}
+
 function objectValue(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
 }
@@ -1038,6 +1266,13 @@ function browserHeaders(accept: string): HeadersInit {
   return {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
     "Accept": accept,
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+}
+
+function facebookHeaders(): Record<string, string> {
+  return {
+    "User-Agent": FACEBOOK_MOBILE_USER_AGENT,
     "Accept-Language": "en-US,en;q=0.9",
   };
 }

@@ -1,6 +1,6 @@
 # Shopping Deals MCP Server
 
-Shopping Deals MCP Server is a Model Context Protocol server for finding products, comparing marketplace listings, and ranking the cheapest real offers across eBay, Amazon, Craigslist, and OfferUp.
+Shopping Deals MCP Server is a Model Context Protocol server for finding products, comparing marketplace listings, and ranking the cheapest real offers across eBay, Facebook Marketplace, Amazon, Craigslist, and OfferUp.
 
 It is built for agents that need to answer questions like:
 
@@ -34,6 +34,7 @@ It is built for agents that need to answer questions like:
 | Source | Coverage | Requires |
 | --- | --- | --- |
 | eBay Browse API | Official eBay item search, shipping, and detail lookups | `EBAY_ACCESS_TOKEN` or `EBAY_APP_ID` + `EBAY_CERT_ID` |
+| Facebook Marketplace public search | Local used marketplace listings | `location` as `latitude,longitude` or `SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE/LONGITUDE`; experimental |
 | Craigslist static search HTML | Local used marketplace listings | none, configure `CRAIGSLIST_SITES` |
 | OfferUp public search | Local used marketplace listings | none |
 | Amazon public search | Amazon product search HTML parser | `SHOPPING_ENABLE_AMAZON_SCRAPE=true`; may be blocked |
@@ -69,6 +70,8 @@ EBAY_DEV_ID=your-ebay-dev-id
 EBAY_MARKETPLACE_ID=EBAY_US
 EBAY_USE_SANDBOX=false
 SHOPPING_ENABLE_AMAZON_SCRAPE=true
+SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE=40.7128
+SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE=-74.0060
 ```
 
 Run over stdio:
@@ -232,10 +235,22 @@ Find ranked deals across marketplaces:
 ```json
 {
   "query": "sony wh-1000xm5 headphones",
-  "sources": ["ebay", "craigslist", "offerup", "amazon"],
+  "sources": ["ebay", "facebook_marketplace", "craigslist", "offerup", "amazon"],
+  "location": "40.7128,-74.0060",
   "max_results": 10,
   "max_results_per_source": 20,
   "condition": "any"
+}
+```
+
+Search Facebook Marketplace near New York City:
+
+```json
+{
+  "query": "used bike",
+  "sources": ["facebook_marketplace"],
+  "location": "40.7128,-74.0060",
+  "max_results_per_source": 10
 }
 ```
 
@@ -262,6 +277,9 @@ Compare prices:
 | `EBAY_USE_SANDBOX` | optional | Set `true` for sandbox eBay APIs. |
 | `SERPAPI_API_KEY` | optional | Enables Google Shopping via SerpApi. |
 | `CRAIGSLIST_SITES` | optional | Comma-separated Craigslist sites. |
+| `SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE` | optional | Default Facebook Marketplace search latitude. |
+| `SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE` | optional | Default Facebook Marketplace search longitude. |
+| `SHOPPING_FACEBOOK_MARKETPLACE_RADIUS_KM` | optional | Facebook Marketplace search radius. Defaults to `16`. |
 | `SHOPPING_ENABLE_AMAZON_SCRAPE` | optional | Enables Amazon public HTML parsing. |
 | `SHOPPING_HTTP_TIMEOUT_SECONDS` | optional | Request timeout. Defaults to `15`. |
 | `SHOPPING_MAX_RESULTS_PER_SOURCE` | optional | Default per-source search size. |
@@ -293,6 +311,7 @@ MIT
 
 - Deal scores are triage signals, not purchase guarantees.
 - Always verify seller reputation, return policy, warranty, shipping, taxes, and authenticity before buying.
-- Amazon, Craigslist, and OfferUp public parsers may break if those sites change markup or block traffic.
+- Amazon, Craigslist, Facebook Marketplace, and OfferUp public parsers may break if those sites change markup or block traffic.
+- Facebook Marketplace support is experimental. It uses Facebook's public Marketplace web feed with an anonymous page token and requires a local search center.
 - Craigslist RSS returns HTTP 403 from Cloudflare Worker egress, so the Worker uses Craigslist static search HTML cards.
 - Tax is estimated from a supplied rate. Final checkout tax may differ.
