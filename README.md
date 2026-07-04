@@ -6,6 +6,7 @@ It replaces the old FastAPI marketplace app shape with a focused MCP surface:
 
 - `search_products` - searches enabled platforms and returns normalized listings.
 - `find_best_deals` - searches, scores, and explains the strongest deals.
+- `find_cheapest_offers` - filters exact-model matches and sorts by shipped total when available.
 - `compare_prices` - groups comparable listings and reports price ranges.
 - `get_listing_details` - fetches source-specific listing details where supported.
 - `list_sources` - shows source availability and required configuration.

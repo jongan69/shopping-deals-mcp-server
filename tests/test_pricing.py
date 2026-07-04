@@ -158,6 +158,40 @@ def test_score_uses_comparable_price_baseline_not_accessory_baseline():
     assert scored[-1].listing.id == "accessory"
 
 
+def test_score_deals_prefers_lower_shipped_total_over_lower_item_price():
+    listings = [
+        Listing(
+            id="low-item-high-ship",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI Osmo Pocket Four Pro(4P) Standard Combo/Vlog Creator Combo",
+            url="https://example.com/low-item",
+            price=759.0,
+            shipping_cost=99.99,
+            total_price=858.99,
+            shipping="Shipping $99.99",
+            condition="new",
+        ),
+        Listing(
+            id="higher-item-free-ship",
+            source="ebay",
+            marketplace="eBay",
+            title="Osmo Pocket 4P(Pro) Standard Combo",
+            url="https://example.com/free-ship",
+            price=825.9,
+            shipping_cost=0.0,
+            total_price=825.9,
+            shipping="Free shipping",
+            condition="new",
+        ),
+    ]
+
+    scored = score_deals("DJI OSMO Pocket 4P", listings)
+
+    assert scored[0].listing.id == "higher-item-free-ship"
+    assert "shipped total" in scored[0].rank_reason
+
+
 def test_dedupe_keeps_cheapest_same_title():
     listings = [
         Listing(

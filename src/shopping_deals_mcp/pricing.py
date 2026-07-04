@@ -136,18 +136,21 @@ def dedupe_listings(listings: list[Listing]) -> list[Listing]:
 
 
 def _price_sort_value(listing: Listing) -> float:
-    return listing.price if listing.price is not None else float("inf")
+    price = effective_price(listing)
+    return price if price is not None else float("inf")
 
 
 def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
     comparable_priced = [
-        listing.price
+        effective_price(listing)
         for listing in listings
-        if listing.price is not None
+        if effective_price(listing) is not None
         and not is_accessory_mismatch(query, listing.title)
         and not is_model_token_mismatch(query, listing.title)
     ]
-    priced = comparable_priced or [listing.price for listing in listings if listing.price is not None]
+    priced = comparable_priced or [
+        effective_price(listing) for listing in listings if effective_price(listing) is not None
+    ]
     if priced:
         low = min(priced)
         high = max(priced)
@@ -158,14 +161,15 @@ def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
     scored: list[DealResult] = []
     for listing in listings:
         relevance = title_similarity(query, listing.title)
+        listing_price = effective_price(listing)
         price_score = 35.0
 
         warnings: list[str] = []
-        if listing.price is None:
+        if listing_price is None:
             price_score = 15.0
             warnings.append("No price was available, so the deal score is less certain.")
         elif low is not None and high is not None and not math.isclose(low, high):
-            price_score = 55.0 * (1 - ((listing.price - low) / (high - low)))
+            price_score = 55.0 * (1 - ((listing_price - low) / (high - low)))
         elif avg:
             price_score = 45.0
 
@@ -237,14 +241,20 @@ def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
     return scored
 
 
+def effective_price(listing: Listing) -> float | None:
+    return listing.total_price if listing.total_price is not None else listing.price
+
+
 def _rank_reason(listing: Listing, low: float | None, avg: float | None, relevance: float) -> str:
     pieces: list[str] = []
-    if listing.price is not None and low is not None and math.isclose(listing.price, low):
-        pieces.append("lowest observed price")
-    elif listing.price is not None and avg is not None and listing.price < avg:
-        pieces.append(f"below the observed average of ${avg:.2f}")
-    elif listing.price is not None:
-        pieces.append("priced within the observed result range")
+    price = effective_price(listing)
+    basis = "shipped total" if listing.total_price is not None else "price"
+    if price is not None and low is not None and math.isclose(price, low):
+        pieces.append(f"lowest observed {basis}")
+    elif price is not None and avg is not None and price < avg:
+        pieces.append(f"below the observed average {basis} of ${avg:.2f}")
+    elif price is not None:
+        pieces.append(f"{basis} within the observed result range")
     else:
         pieces.append("price unavailable")
 

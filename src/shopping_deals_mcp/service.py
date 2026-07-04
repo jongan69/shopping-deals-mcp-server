@@ -9,6 +9,7 @@ from shopping_deals_mcp.config import settings
 from shopping_deals_mcp.models import PriceComparison, SearchResponse, SourceStatus
 from shopping_deals_mcp.pricing import (
     dedupe_listings,
+    effective_price,
     is_accessory_mismatch,
     is_model_token_mismatch,
     product_key,
@@ -76,8 +77,8 @@ class ShoppingDealsService:
                 is_accessory_mismatch(query, item.title),
                 is_model_token_mismatch(query, item.title),
                 -title_similarity(query, item.title),
-                item.price is None,
-                item.price or float("inf"),
+                effective_price(item) is None,
+                effective_price(item) or float("inf"),
                 item.title,
             )
         )
@@ -120,6 +121,47 @@ class ShoppingDealsService:
             "best_deals": [deal.model_dump() for deal in scored],
         }
 
+    async def find_cheapest_offers(
+        self,
+        query: str,
+        *,
+        sources: list[str] | None = None,
+        max_results: int = 10,
+        max_results_per_source: int | None = None,
+        price_min: float | None = None,
+        price_max: float | None = None,
+        condition: str = "any",
+        location: str | None = None,
+    ) -> dict:
+        response = await self.search_products(
+            query,
+            sources=sources,
+            max_results_per_source=max_results_per_source,
+            price_min=price_min,
+            price_max=price_max,
+            condition=condition,
+            location=location,
+        )
+        eligible = [
+            listing
+            for listing in response.listings
+            if effective_price(listing) is not None
+            and not is_accessory_mismatch(query, listing.title)
+            and not is_model_token_mismatch(query, listing.title)
+        ]
+        cheapest = sorted(
+            eligible,
+            key=lambda listing: (effective_price(listing) or float("inf"), listing.title),
+        )
+        return {
+            "query": query,
+            "searched_at": response.searched_at,
+            "source_errors": response.source_errors,
+            "total_results": response.total_results,
+            "eligible_results": len(eligible),
+            "cheapest_offers": [listing.model_dump() for listing in cheapest[:max_results]],
+        }
+
     async def compare_prices(
         self,
         query: str,
@@ -146,7 +188,7 @@ class ShoppingDealsService:
 
         comparisons: list[PriceComparison] = []
         for key, listings in groups.items():
-            prices = [listing.price for listing in listings if listing.price is not None]
+            prices = [effective_price(listing) for listing in listings if effective_price(listing) is not None]
             comparisons.append(
                 PriceComparison(
                     group_key=key,

@@ -67,6 +67,30 @@ async def find_best_deals(
 
 
 @mcp.tool()
+async def find_cheapest_offers(
+    query: str,
+    sources: list[str] | None = None,
+    max_results: int = 10,
+    max_results_per_source: int | None = None,
+    price_min: float | None = None,
+    price_max: float | None = None,
+    condition: str = "any",
+    location: str | None = None,
+) -> dict:
+    """Search products and return exact-model offers sorted by shipped total when available."""
+    return await service.find_cheapest_offers(
+        query,
+        sources=sources,
+        max_results=max_results,
+        max_results_per_source=max_results_per_source,
+        price_min=price_min,
+        price_max=price_max,
+        condition=condition,
+        location=location,
+    )
+
+
+@mcp.tool()
 async def compare_prices(
     query: str,
     sources: list[str] | None = None,

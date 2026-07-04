@@ -145,6 +145,7 @@ class EbaySource(MarketplaceSource):
         listings: list[Listing] = []
         for item in data.get("itemSummaries", [])[:max_results]:
             price = _amount(item.get("price"))
+            shipping_cost = _shipping_cost(item)
             listings.append(
                 Listing(
                     id=str(item.get("itemId") or item.get("legacyItemId") or ""),
@@ -153,6 +154,8 @@ class EbaySource(MarketplaceSource):
                     title=str(item.get("title") or "").strip(),
                     url=str(item.get("itemWebUrl") or ""),
                     price=price,
+                    shipping_cost=shipping_cost,
+                    total_price=_total_price(price, shipping_cost),
                     currency=str((item.get("price") or {}).get("currency") or "USD"),
                     condition=_normalize_condition(item.get("condition")),
                     image_url=(item.get("image") or {}).get("imageUrl"),
@@ -183,13 +186,17 @@ class EbaySource(MarketplaceSource):
             response.raise_for_status()
             item = response.json()
 
+        price = _amount(item.get("price"))
+        shipping_cost = _shipping_cost(item)
         return Listing(
             id=str(item.get("itemId") or listing_id),
             source=self.name,
             marketplace="eBay",
             title=str(item.get("title") or "").strip(),
             url=str(item.get("itemWebUrl") or ""),
-            price=_amount(item.get("price")),
+            price=price,
+            shipping_cost=shipping_cost,
+            total_price=_total_price(price, shipping_cost),
             currency=str((item.get("price") or {}).get("currency") or "USD"),
             condition=_normalize_condition(item.get("condition")),
             image_url=(item.get("image") or {}).get("imageUrl"),
@@ -272,16 +279,29 @@ def _location_text(payload: object) -> str | None:
 
 
 def _shipping_text(item: dict) -> str | None:
-    options = item.get("shippingOptions") or []
-    if not options:
-        return None
-    option = options[0]
-    cost = _amount(option.get("shippingCost"))
+    cost = _shipping_cost(item)
     if cost == 0:
         return "Free shipping"
     if cost is not None:
         return f"Shipping ${cost:.2f}"
-    return option.get("shippingCostType")
+    options = item.get("shippingOptions") or []
+    if not options:
+        return None
+    return options[0].get("shippingCostType")
+
+
+def _shipping_cost(item: dict) -> float | None:
+    options = item.get("shippingOptions") or []
+    if not options:
+        return None
+    option = options[0]
+    return _amount(option.get("shippingCost"))
+
+
+def _total_price(price: float | None, shipping_cost: float | None) -> float | None:
+    if price is None:
+        return None
+    return price + (shipping_cost or 0.0)
 
 
 def _query_variants(query: str) -> list[str]:
@@ -302,10 +322,11 @@ def _query_variants(query: str) -> list[str]:
 
 
 def _candidate_sort_key(query: str, listing: Listing) -> tuple[bool, bool, bool, float, str]:
+    effective_price = listing.total_price if listing.total_price is not None else listing.price
     return (
         is_accessory_mismatch(query, listing.title),
         is_model_token_mismatch(query, listing.title),
-        listing.price is None,
-        listing.price if listing.price is not None else float("inf"),
+        effective_price is None,
+        effective_price if effective_price is not None else float("inf"),
         listing.title,
     )

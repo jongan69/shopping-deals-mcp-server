@@ -22,6 +22,8 @@ type Listing = {
   title: string;
   url: string;
   price: number | null;
+  shipping_cost?: number | null;
+  total_price?: number | null;
   currency: string;
   condition: string;
   image_url?: string | null;
@@ -157,6 +159,47 @@ function createServer(env: Env) {
         source_errors: response.source_errors,
         total_results: response.total_results,
         best_deals: bestDeals,
+      });
+    },
+  );
+
+  server.tool(
+    "find_cheapest_offers",
+    "Search products and return exact-model offers sorted by shipped total when available.",
+    {
+      query: z.string().min(1),
+      sources: z.array(z.string()).optional(),
+      max_results: z.number().int().positive().optional(),
+      max_results_per_source: z.number().int().positive().optional(),
+      price_min: z.number().optional(),
+      price_max: z.number().optional(),
+      condition: z.string().optional(),
+      location: z.string().optional(),
+    },
+    async (args) => {
+      const response = await searchProducts(env, {
+        query: args.query,
+        sources: args.sources,
+        maxResultsPerSource: args.max_results_per_source,
+        priceMin: args.price_min,
+        priceMax: args.price_max,
+        condition: args.condition ?? "any",
+        location: args.location,
+      });
+      const eligible = response.listings
+        .filter((listing) =>
+          effectivePrice(listing) !== null &&
+          !isAccessoryMismatch(args.query, listing.title) &&
+          !isModelTokenMismatch(args.query, listing.title),
+        )
+        .sort((a, b) => priceSort(a) - priceSort(b) || a.title.localeCompare(b.title));
+      return toolText({
+        query: args.query,
+        searched_at: response.searched_at,
+        source_errors: response.source_errors,
+        total_results: response.total_results,
+        eligible_results: eligible.length,
+        cheapest_offers: eligible.slice(0, args.max_results ?? 10),
       });
     },
   );
@@ -419,13 +462,17 @@ function ebayListing(item: Record<string, unknown>): Listing {
   const price = objectValue(item.price);
   const seller = objectValue(item.seller);
   const image = objectValue(item.image);
+  const priceAmount = amount(price);
+  const shippingCost = ebayShippingCost(item);
   return {
     id: String(item.itemId ?? item.legacyItemId ?? ""),
     source: "ebay",
     marketplace: "eBay",
     title: String(item.title ?? "").trim(),
     url: String(item.itemWebUrl ?? ""),
-    price: amount(price),
+    price: priceAmount,
+    shipping_cost: shippingCost,
+    total_price: totalPrice(priceAmount, shippingCost),
     currency: String(price?.currency ?? "USD"),
     condition: normalizeCondition(item.condition),
     image_url: typeof image?.imageUrl === "string" ? image.imageUrl : null,
@@ -670,9 +717,9 @@ function parseCraigslistMarkdown(site: string, markdown: string, limit: number):
 
 function scoreDeals(query: string, listings: Listing[]) {
   const comparablePrices = listings
-    .filter((listing) => listing.price !== null && !isAccessoryMismatch(query, listing.title) && !isModelTokenMismatch(query, listing.title))
-    .map((listing) => listing.price as number);
-  const prices = comparablePrices.length ? comparablePrices : listings.filter((listing) => listing.price !== null).map((listing) => listing.price as number);
+    .filter((listing) => effectivePrice(listing) !== null && !isAccessoryMismatch(query, listing.title) && !isModelTokenMismatch(query, listing.title))
+    .map((listing) => effectivePrice(listing) as number);
+  const prices = comparablePrices.length ? comparablePrices : listings.filter((listing) => effectivePrice(listing) !== null).map((listing) => effectivePrice(listing) as number);
   const low = prices.length ? Math.min(...prices) : null;
   const high = prices.length ? Math.max(...prices) : null;
   const avg = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : null;
@@ -680,12 +727,13 @@ function scoreDeals(query: string, listings: Listing[]) {
   return listings.map((listing) => {
     const warnings: string[] = [];
     const relevance = titleSimilarity(query, listing.title);
+    const listingPrice = effectivePrice(listing);
     let priceScore = 35;
-    if (listing.price === null) {
+    if (listingPrice === null) {
       priceScore = 15;
       warnings.push("No price was available, so the deal score is less certain.");
     } else if (low !== null && high !== null && low !== high) {
-      priceScore = 55 * (1 - ((listing.price - low) / (high - low)));
+      priceScore = 55 * (1 - ((listingPrice - low) / (high - low)));
     } else if (avg !== null) {
       priceScore = 45;
     }
@@ -797,9 +845,11 @@ function titleSimilarity(query: string, title: string): number {
 
 function rankReason(listing: Listing, low: number | null, avg: number | null, relevance: number): string {
   const pieces: string[] = [];
-  if (listing.price !== null && low !== null && listing.price === low) pieces.push("lowest observed price");
-  else if (listing.price !== null && avg !== null && listing.price < avg) pieces.push(`below the observed average of $${avg.toFixed(2)}`);
-  else if (listing.price !== null) pieces.push("priced within the observed result range");
+  const price = effectivePrice(listing);
+  const basis = listing.total_price !== null && listing.total_price !== undefined ? "shipped total" : "price";
+  if (price !== null && low !== null && price === low) pieces.push(`lowest observed ${basis}`);
+  else if (price !== null && avg !== null && price < avg) pieces.push(`below the observed average ${basis} of $${avg.toFixed(2)}`);
+  else if (price !== null) pieces.push(`${basis} within the observed result range`);
   else pieces.push("price unavailable");
   pieces.push(relevance >= 0.75 ? "strong title match" : relevance >= 0.45 ? "reasonable title match" : "weak title match");
   if (listing.condition && listing.condition !== "unknown") pieces.push(`condition: ${listing.condition}`);
@@ -848,12 +898,18 @@ function craigslistAddress(site: string, payload: Record<string, unknown> | null
 }
 
 function shippingText(item: Record<string, unknown>): string | null {
-  const options = Array.isArray(item.shippingOptions) ? item.shippingOptions : [];
-  const first = objectValue(options[0]);
-  const cost = amount(objectValue(first?.shippingCost));
+  const cost = ebayShippingCost(item);
   if (cost === 0) return "Free shipping";
   if (cost !== null) return `Shipping $${cost.toFixed(2)}`;
+  const options = Array.isArray(item.shippingOptions) ? item.shippingOptions : [];
+  const first = objectValue(options[0]);
   return typeof first?.shippingCostType === "string" ? first.shippingCostType : null;
+}
+
+function ebayShippingCost(item: Record<string, unknown>): number | null {
+  const options = Array.isArray(item.shippingOptions) ? item.shippingOptions : [];
+  const first = objectValue(options[0]);
+  return amount(objectValue(first?.shippingCost));
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -884,11 +940,20 @@ function searchResultSort(query: string, a: Listing, b: Listing): number {
 }
 
 function priceSort(listing: Listing): number {
-  return priceSortValue(listing.price);
+  return priceSortValue(effectivePrice(listing));
 }
 
 function priceSortValue(price: number | null): number {
   return price === null ? Number.POSITIVE_INFINITY : price;
+}
+
+function effectivePrice(listing: Listing): number | null {
+  return listing.total_price ?? listing.price;
+}
+
+function totalPrice(price: number | null, shippingCost: number | null): number | null {
+  if (price === null) return null;
+  return price + (shippingCost ?? 0);
 }
 
 function applyPriceBounds(listings: Listing[], priceMin?: number, priceMax?: number): Listing[] {
