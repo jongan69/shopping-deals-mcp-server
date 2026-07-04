@@ -6,7 +6,7 @@ import asyncio
 from collections import defaultdict
 
 from shopping_deals_mcp.config import settings
-from shopping_deals_mcp.models import PriceComparison, SearchResponse, SourceStatus
+from shopping_deals_mcp.models import Listing, PriceComparison, SearchResponse, SourceStatus
 from shopping_deals_mcp.pricing import (
     dedupe_listings,
     effective_price,
@@ -102,6 +102,8 @@ class ShoppingDealsService:
         price_max: float | None = None,
         condition: str = "any",
         location: str | None = None,
+        tax_rate_percent: float | None = None,
+        tax_on_shipping: bool | None = None,
     ) -> dict:
         response = await self.search_products(
             query,
@@ -112,11 +114,14 @@ class ShoppingDealsService:
             condition=condition,
             location=location,
         )
-        scored = score_deals(query, response.listings)[:max_results]
+        listings = apply_tax_estimates(response.listings, tax_rate_percent, tax_on_shipping)
+        scored = score_deals(query, listings)[:max_results]
         return {
             "query": query,
             "searched_at": response.searched_at,
             "source_errors": response.source_errors,
+            "tax_rate_percent": resolved_tax_rate(tax_rate_percent),
+            "tax_on_shipping": resolved_tax_on_shipping(tax_on_shipping),
             "total_results": response.total_results,
             "best_deals": [deal.model_dump() for deal in scored],
         }
@@ -132,6 +137,8 @@ class ShoppingDealsService:
         price_max: float | None = None,
         condition: str = "any",
         location: str | None = None,
+        tax_rate_percent: float | None = None,
+        tax_on_shipping: bool | None = None,
     ) -> dict:
         response = await self.search_products(
             query,
@@ -142,9 +149,10 @@ class ShoppingDealsService:
             condition=condition,
             location=location,
         )
+        listings = apply_tax_estimates(response.listings, tax_rate_percent, tax_on_shipping)
         eligible = [
             listing
-            for listing in response.listings
+            for listing in listings
             if effective_price(listing) is not None
             and not is_accessory_mismatch(query, listing.title)
             and not is_model_token_mismatch(query, listing.title)
@@ -157,6 +165,8 @@ class ShoppingDealsService:
             "query": query,
             "searched_at": response.searched_at,
             "source_errors": response.source_errors,
+            "tax_rate_percent": resolved_tax_rate(tax_rate_percent),
+            "tax_on_shipping": resolved_tax_on_shipping(tax_on_shipping),
             "total_results": response.total_results,
             "eligible_results": len(eligible),
             "cheapest_offers": [listing.model_dump() for listing in cheapest[:max_results]],
@@ -227,3 +237,39 @@ class ShoppingDealsService:
         if listing is None:
             return {"error": "Listing details are unavailable for this source or listing."}
         return listing.model_dump()
+
+
+def resolved_tax_rate(tax_rate_percent: float | None) -> float | None:
+    return tax_rate_percent if tax_rate_percent is not None else settings.estimated_tax_rate_percent
+
+
+def resolved_tax_on_shipping(tax_on_shipping: bool | None) -> bool:
+    return tax_on_shipping if tax_on_shipping is not None else settings.tax_shipping_by_default
+
+
+def apply_tax_estimates(
+    listings: list[Listing],
+    tax_rate_percent: float | None = None,
+    tax_on_shipping: bool | None = None,
+) -> list[Listing]:
+    rate = resolved_tax_rate(tax_rate_percent)
+    if rate is None:
+        return listings
+    include_shipping = resolved_tax_on_shipping(tax_on_shipping)
+    estimated: list[Listing] = []
+    for listing in listings:
+        base_total = listing.total_price if listing.total_price is not None else listing.price
+        if base_total is None or listing.price is None:
+            estimated.append(listing)
+            continue
+        taxable_base = base_total if include_shipping else listing.price
+        tax = round(taxable_base * (rate / 100), 2)
+        estimated.append(
+            listing.model_copy(
+                update={
+                    "estimated_tax": tax,
+                    "total_with_tax": round(base_total + tax, 2),
+                }
+            )
+        )
+    return estimated

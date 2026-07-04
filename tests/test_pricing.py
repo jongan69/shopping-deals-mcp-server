@@ -192,6 +192,42 @@ def test_score_deals_prefers_lower_shipped_total_over_lower_item_price():
     assert "shipped total" in scored[0].rank_reason
 
 
+def test_score_deals_can_include_estimated_tax_total():
+    listings = [
+        Listing(
+            id="taxed",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI Osmo Pocket 4P Standard Combo",
+            url="https://example.com/taxed",
+            price=825.9,
+            shipping_cost=0.0,
+            total_price=825.9,
+            estimated_tax=72.27,
+            total_with_tax=898.17,
+            condition="new",
+        ),
+        Listing(
+            id="untaxed-lower",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI Osmo Pocket 4P Standard Combo",
+            url="https://example.com/untaxed",
+            price=829.0,
+            shipping_cost=0.0,
+            total_price=829.0,
+            estimated_tax=0.0,
+            total_with_tax=829.0,
+            condition="new",
+        ),
+    ]
+
+    scored = score_deals("DJI OSMO Pocket 4P", listings)
+
+    assert scored[0].listing.id == "untaxed-lower"
+    assert "estimated total with tax" in scored[0].rank_reason
+
+
 def test_dedupe_keeps_cheapest_same_title():
     listings = [
         Listing(

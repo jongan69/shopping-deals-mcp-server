@@ -6,7 +6,7 @@ It replaces the old FastAPI marketplace app shape with a focused MCP surface:
 
 - `search_products` - searches enabled platforms and returns normalized listings.
 - `find_best_deals` - searches, scores, and explains the strongest deals.
-- `find_cheapest_offers` - filters exact-model matches and sorts by shipped total when available.
+- `find_cheapest_offers` - filters exact-model matches and sorts by shipped total plus estimated tax when available.
 - `compare_prices` - groups comparable listings and reports price ranges.
 - `get_listing_details` - fetches source-specific listing details where supported.
 - `list_sources` - shows source availability and required configuration.
@@ -73,6 +73,15 @@ printf '%s' "$EBAY_CERT_ID" | npx wrangler secret put EBAY_CERT_ID
 printf '%s' "$EBAY_DEV_ID" | npx wrangler secret put EBAY_DEV_ID
 npm run deploy
 ```
+
+Optional tax-estimate defaults:
+
+```bash
+SHOPPING_ESTIMATED_TAX_RATE_PERCENT=8.875
+SHOPPING_TAX_SHIPPING=true
+```
+
+`find_best_deals` and `find_cheapest_offers` also accept `tax_rate_percent` and `tax_on_shipping` per call. Tax is estimated from the supplied rate; eBay Browse search results indicate tax metadata but do not return the buyer's final checkout tax amount.
 
 Current deployed MCP endpoint:
 

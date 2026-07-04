@@ -52,6 +52,8 @@ async def find_best_deals(
     price_max: float | None = None,
     condition: str = "any",
     location: str | None = None,
+    tax_rate_percent: float | None = None,
+    tax_on_shipping: bool | None = None,
 ) -> dict:
     """Search products and rank the strongest deals with reasons and warnings."""
     return await service.find_best_deals(
@@ -63,6 +65,8 @@ async def find_best_deals(
         price_max=price_max,
         condition=condition,
         location=location,
+        tax_rate_percent=tax_rate_percent,
+        tax_on_shipping=tax_on_shipping,
     )
 
 
@@ -76,8 +80,10 @@ async def find_cheapest_offers(
     price_max: float | None = None,
     condition: str = "any",
     location: str | None = None,
+    tax_rate_percent: float | None = None,
+    tax_on_shipping: bool | None = None,
 ) -> dict:
-    """Search products and return exact-model offers sorted by shipped total when available."""
+    """Search products and return exact-model offers sorted by shipped total plus estimated tax."""
     return await service.find_cheapest_offers(
         query,
         sources=sources,
@@ -87,6 +93,8 @@ async def find_cheapest_offers(
         price_max=price_max,
         condition=condition,
         location=location,
+        tax_rate_percent=tax_rate_percent,
+        tax_on_shipping=tax_on_shipping,
     )
 
 

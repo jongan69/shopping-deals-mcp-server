@@ -27,6 +27,8 @@ class Listing(BaseModel):
     price: float | None = Field(default=None, ge=0)
     shipping_cost: float | None = Field(default=None, ge=0)
     total_price: float | None = Field(default=None, ge=0)
+    estimated_tax: float | None = Field(default=None, ge=0)
+    total_with_tax: float | None = Field(default=None, ge=0)
     currency: str = "USD"
     condition: str = "unknown"
     image_url: str | None = None

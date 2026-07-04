@@ -13,6 +13,8 @@ type Env = {
   SHOPPING_ENABLE_AMAZON_SCRAPE?: string;
   SHOPPING_HTTP_TIMEOUT_SECONDS?: string;
   SHOPPING_MAX_RESULTS_PER_SOURCE?: string;
+  SHOPPING_ESTIMATED_TAX_RATE_PERCENT?: string;
+  SHOPPING_TAX_SHIPPING?: string;
 };
 
 type Listing = {
@@ -24,6 +26,8 @@ type Listing = {
   price: number | null;
   shipping_cost?: number | null;
   total_price?: number | null;
+  estimated_tax?: number | null;
+  total_with_tax?: number | null;
   currency: string;
   condition: string;
   image_url?: string | null;
@@ -141,6 +145,8 @@ function createServer(env: Env) {
       price_max: z.number().optional(),
       condition: z.string().optional(),
       location: z.string().optional(),
+      tax_rate_percent: z.number().optional(),
+      tax_on_shipping: z.boolean().optional(),
     },
     async (args) => {
       const response = await searchProducts(env, {
@@ -152,11 +158,14 @@ function createServer(env: Env) {
         condition: args.condition ?? "any",
         location: args.location,
       });
-      const bestDeals = scoreDeals(args.query, response.listings).slice(0, args.max_results ?? 10);
+      const listings = applyTaxEstimates(env, response.listings, args.tax_rate_percent, args.tax_on_shipping);
+      const bestDeals = scoreDeals(args.query, listings).slice(0, args.max_results ?? 10);
       return toolText({
         query: args.query,
         searched_at: response.searched_at,
         source_errors: response.source_errors,
+        tax_rate_percent: resolvedTaxRate(env, args.tax_rate_percent),
+        tax_on_shipping: resolvedTaxOnShipping(env, args.tax_on_shipping),
         total_results: response.total_results,
         best_deals: bestDeals,
       });
@@ -175,6 +184,8 @@ function createServer(env: Env) {
       price_max: z.number().optional(),
       condition: z.string().optional(),
       location: z.string().optional(),
+      tax_rate_percent: z.number().optional(),
+      tax_on_shipping: z.boolean().optional(),
     },
     async (args) => {
       const response = await searchProducts(env, {
@@ -186,7 +197,8 @@ function createServer(env: Env) {
         condition: args.condition ?? "any",
         location: args.location,
       });
-      const eligible = response.listings
+      const listings = applyTaxEstimates(env, response.listings, args.tax_rate_percent, args.tax_on_shipping);
+      const eligible = listings
         .filter((listing) =>
           effectivePrice(listing) !== null &&
           !isAccessoryMismatch(args.query, listing.title) &&
@@ -197,6 +209,8 @@ function createServer(env: Env) {
         query: args.query,
         searched_at: response.searched_at,
         source_errors: response.source_errors,
+        tax_rate_percent: resolvedTaxRate(env, args.tax_rate_percent),
+        tax_on_shipping: resolvedTaxOnShipping(env, args.tax_on_shipping),
         total_results: response.total_results,
         eligible_results: eligible.length,
         cheapest_offers: eligible.slice(0, args.max_results ?? 10),
@@ -846,7 +860,9 @@ function titleSimilarity(query: string, title: string): number {
 function rankReason(listing: Listing, low: number | null, avg: number | null, relevance: number): string {
   const pieces: string[] = [];
   const price = effectivePrice(listing);
-  const basis = listing.total_price !== null && listing.total_price !== undefined ? "shipped total" : "price";
+  const basis = listing.total_with_tax !== null && listing.total_with_tax !== undefined
+    ? "estimated total with tax"
+    : listing.total_price !== null && listing.total_price !== undefined ? "shipped total" : "price";
   if (price !== null && low !== null && price === low) pieces.push(`lowest observed ${basis}`);
   else if (price !== null && avg !== null && price < avg) pieces.push(`below the observed average ${basis} of $${avg.toFixed(2)}`);
   else if (price !== null) pieces.push(`${basis} within the observed result range`);
@@ -948,12 +964,50 @@ function priceSortValue(price: number | null): number {
 }
 
 function effectivePrice(listing: Listing): number | null {
+  if (listing.total_with_tax !== undefined && listing.total_with_tax !== null) return listing.total_with_tax;
   return listing.total_price ?? listing.price;
 }
 
 function totalPrice(price: number | null, shippingCost: number | null): number | null {
   if (price === null) return null;
   return price + (shippingCost ?? 0);
+}
+
+function applyTaxEstimates(
+  env: Env,
+  listings: Listing[],
+  taxRatePercent?: number,
+  taxOnShipping?: boolean,
+): Listing[] {
+  const rate = resolvedTaxRate(env, taxRatePercent);
+  if (rate === null) return listings;
+  const includeShipping = resolvedTaxOnShipping(env, taxOnShipping);
+  return listings.map((listing) => {
+    const baseTotal = listing.total_price ?? listing.price;
+    if (baseTotal === null || listing.price === null) return listing;
+    const taxableBase = includeShipping ? baseTotal : listing.price;
+    const estimatedTax = roundMoney(taxableBase * (rate / 100));
+    return {
+      ...listing,
+      estimated_tax: estimatedTax,
+      total_with_tax: roundMoney(baseTotal + estimatedTax),
+    };
+  });
+}
+
+function resolvedTaxRate(env: Env, taxRatePercent?: number): number | null {
+  if (taxRatePercent !== undefined) return taxRatePercent;
+  const parsed = Number.parseFloat(env.SHOPPING_ESTIMATED_TAX_RATE_PERCENT ?? "");
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolvedTaxOnShipping(env: Env, taxOnShipping?: boolean): boolean {
+  if (taxOnShipping !== undefined) return taxOnShipping;
+  return boolEnv(env.SHOPPING_TAX_SHIPPING, true);
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function applyPriceBounds(listings: Listing[], priceMin?: number, priceMax?: number): Listing[] {

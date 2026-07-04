@@ -242,13 +242,20 @@ def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
 
 
 def effective_price(listing: Listing) -> float | None:
+    if listing.total_with_tax is not None:
+        return listing.total_with_tax
     return listing.total_price if listing.total_price is not None else listing.price
 
 
 def _rank_reason(listing: Listing, low: float | None, avg: float | None, relevance: float) -> str:
     pieces: list[str] = []
     price = effective_price(listing)
-    basis = "shipped total" if listing.total_price is not None else "price"
+    if listing.total_with_tax is not None:
+        basis = "estimated total with tax"
+    elif listing.total_price is not None:
+        basis = "shipped total"
+    else:
+        basis = "price"
     if price is not None and low is not None and math.isclose(price, low):
         pieces.append(f"lowest observed {basis}")
     elif price is not None and avg is not None and price < avg:

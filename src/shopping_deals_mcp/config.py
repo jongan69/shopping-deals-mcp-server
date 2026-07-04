@@ -37,6 +37,16 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_optional_float(name: str) -> float | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class Settings:
     serpapi_api_key: str = os.getenv("SERPAPI_API_KEY", "")
@@ -56,6 +66,10 @@ class Settings:
     enable_amazon_scrape: bool = _env_bool("SHOPPING_ENABLE_AMAZON_SCRAPE", False)
     http_timeout_seconds: float = _env_float("SHOPPING_HTTP_TIMEOUT_SECONDS", 15.0)
     max_results_per_source: int = _env_int("SHOPPING_MAX_RESULTS_PER_SOURCE", 25)
+    estimated_tax_rate_percent: float | None = _env_optional_float(
+        "SHOPPING_ESTIMATED_TAX_RATE_PERCENT"
+    )
+    tax_shipping_by_default: bool = _env_bool("SHOPPING_TAX_SHIPPING", True)
 
 
 settings = Settings()
