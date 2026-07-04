@@ -1,0 +1,181 @@
+"""Price parsing and deal scoring helpers."""
+
+from __future__ import annotations
+
+import math
+import re
+from difflib import SequenceMatcher
+from statistics import mean
+
+from shopping_deals_mcp.models import DealResult, Listing
+
+PRICE_RE = re.compile(r"\$?\s*([0-9]+(?:\.[0-9]{2})?)")
+STOP_WORDS = {
+    "the",
+    "a",
+    "an",
+    "for",
+    "with",
+    "and",
+    "or",
+    "new",
+    "used",
+    "open",
+    "box",
+}
+
+
+def parse_price(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value) if value >= 0 else None
+
+    text = str(value).replace(",", "")
+    match = PRICE_RE.search(text)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", text.lower()).strip()
+
+
+def product_key(title: str) -> str:
+    tokens = [
+        token
+        for token in normalize_text(title).split()
+        if token not in STOP_WORDS and len(token) > 1
+    ]
+    return " ".join(tokens[:8])
+
+
+def title_similarity(query: str, title: str) -> float:
+    query_norm = normalize_text(query)
+    title_norm = normalize_text(title)
+    if not query_norm or not title_norm:
+        return 0.0
+
+    query_tokens = set(query_norm.split())
+    title_tokens = set(title_norm.split())
+    token_overlap = len(query_tokens & title_tokens) / max(len(query_tokens), 1)
+    fuzzy = SequenceMatcher(None, query_norm, title_norm).ratio()
+    return max(token_overlap, fuzzy * 0.8)
+
+
+def dedupe_listings(listings: list[Listing]) -> list[Listing]:
+    seen_urls: set[str] = set()
+    seen_keys: set[tuple[str, str]] = set()
+    deduped: list[Listing] = []
+
+    for listing in listings:
+        url_key = listing.url.split("?")[0].rstrip("/").lower()
+        if url_key in seen_urls:
+            continue
+        seen_urls.add(url_key)
+
+        title_key = (listing.source, product_key(listing.title))
+        if title_key in seen_keys and listing.price is not None:
+            continue
+        seen_keys.add(title_key)
+        deduped.append(listing)
+
+    return deduped
+
+
+def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
+    priced = [listing.price for listing in listings if listing.price is not None]
+    if priced:
+        low = min(priced)
+        high = max(priced)
+        avg = mean(priced)
+    else:
+        low = high = avg = None
+
+    scored: list[DealResult] = []
+    for listing in listings:
+        relevance = title_similarity(query, listing.title)
+        price_score = 35.0
+
+        warnings: list[str] = []
+        if listing.price is None:
+            price_score = 15.0
+            warnings.append("No price was available, so the deal score is less certain.")
+        elif low is not None and high is not None and not math.isclose(low, high):
+            price_score = 55.0 * (1 - ((listing.price - low) / (high - low)))
+        elif avg:
+            price_score = 45.0
+
+        source_bonus = {
+            "ebay": 10.0,
+            "serpapi_google_shopping": 8.0,
+            "craigslist": 4.0,
+            "amazon": 6.0,
+        }.get(listing.source, 3.0)
+
+        condition_bonus = 0.0
+        condition = listing.condition.lower()
+        if condition in {"new", "open_box", "refurbished"}:
+            condition_bonus = 8.0
+        elif condition == "used":
+            condition_bonus = 4.0
+
+        shipping_bonus = 0.0
+        if listing.shipping:
+            shipping_text = listing.shipping.lower()
+            if "free" in shipping_text:
+                shipping_bonus = 5.0
+            elif "pickup" in shipping_text:
+                shipping_bonus = 2.0
+
+        score = max(
+            0.0,
+            min(100.0, price_score + (relevance * 22.0) + source_bonus + condition_bonus + shipping_bonus),
+        )
+
+        if relevance < 0.35:
+            warnings.append("Title match is weak; verify this is the exact product.")
+        if listing.source == "craigslist":
+            warnings.append("Local marketplace listing; verify seller identity and availability.")
+
+        rank_reason = _rank_reason(listing, low, avg, relevance)
+        scored.append(
+            DealResult(
+                listing=listing,
+                deal_score=round(score, 2),
+                rank_reason=rank_reason,
+                warnings=warnings,
+            )
+        )
+
+    scored.sort(key=lambda result: result.deal_score, reverse=True)
+    return scored
+
+
+def _rank_reason(listing: Listing, low: float | None, avg: float | None, relevance: float) -> str:
+    pieces: list[str] = []
+    if listing.price is not None and low is not None and math.isclose(listing.price, low):
+        pieces.append("lowest observed price")
+    elif listing.price is not None and avg is not None and listing.price < avg:
+        pieces.append(f"below the observed average of ${avg:.2f}")
+    elif listing.price is not None:
+        pieces.append("priced within the observed result range")
+    else:
+        pieces.append("price unavailable")
+
+    if relevance >= 0.75:
+        pieces.append("strong title match")
+    elif relevance >= 0.45:
+        pieces.append("reasonable title match")
+    else:
+        pieces.append("weak title match")
+
+    if listing.condition and listing.condition != "unknown":
+        pieces.append(f"condition: {listing.condition}")
+
+    return "; ".join(pieces)
