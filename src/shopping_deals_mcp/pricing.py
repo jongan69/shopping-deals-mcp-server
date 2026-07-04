@@ -38,6 +38,9 @@ ACCESSORY_TERMS = {
     "earpads",
     "filter",
     "filters",
+    "film",
+    "films",
+    "glass",
     "grip",
     "handle",
     "hinge",
@@ -52,11 +55,17 @@ ACCESSORY_TERMS = {
     "protector",
     "repair",
     "replacement",
+    "shade",
+    "shield",
     "skin",
     "sleeve",
     "stand",
     "strap",
+    "sunshade",
     "tripod",
+    "viewfinder",
+    "accessory",
+    "accessories",
 }
 
 
@@ -105,8 +114,7 @@ def title_similarity(query: str, title: str) -> float:
 
 def dedupe_listings(listings: list[Listing]) -> list[Listing]:
     seen_urls: set[str] = set()
-    seen_keys: set[tuple[str, str]] = set()
-    deduped: list[Listing] = []
+    by_title_key: dict[tuple[str, str], Listing] = {}
 
     for listing in listings:
         url_key = listing.url.split("?")[0].rstrip("/").lower()
@@ -114,17 +122,31 @@ def dedupe_listings(listings: list[Listing]) -> list[Listing]:
             continue
         seen_urls.add(url_key)
 
-        title_key = (listing.source, product_key(listing.title))
-        if title_key in seen_keys and listing.price is not None:
+        title_key = (listing.source, normalize_text(listing.title))
+        existing = by_title_key.get(title_key)
+        if existing is None:
+            by_title_key[title_key] = listing
             continue
-        seen_keys.add(title_key)
-        deduped.append(listing)
 
-    return deduped
+        if _price_sort_value(listing) < _price_sort_value(existing):
+            by_title_key[title_key] = listing
+
+    return list(by_title_key.values())
+
+
+def _price_sort_value(listing: Listing) -> float:
+    return listing.price if listing.price is not None else float("inf")
 
 
 def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
-    priced = [listing.price for listing in listings if listing.price is not None]
+    comparable_priced = [
+        listing.price
+        for listing in listings
+        if listing.price is not None
+        and not is_accessory_mismatch(query, listing.title)
+        and not is_model_token_mismatch(query, listing.title)
+    ]
+    priced = comparable_priced or [listing.price for listing in listings if listing.price is not None]
     if priced:
         low = min(priced)
         high = max(priced)

@@ -1,5 +1,6 @@
 from shopping_deals_mcp.models import Listing
 from shopping_deals_mcp.pricing import (
+    dedupe_listings,
     is_accessory_mismatch,
     is_model_token_mismatch,
     parse_price,
@@ -100,6 +101,89 @@ def test_score_deals_penalizes_compatible_accessory_with_exact_model_token():
 
     assert is_accessory_mismatch("DJI OSMO Pocket 4P", listings[0].title)
     assert scored[0].listing.id == "2"
+
+
+def test_accessories_plural_counts_as_accessory_mismatch():
+    assert is_accessory_mismatch(
+        "DJI OSMO Pocket 4P",
+        "Genuine Osmo Pocket 4P(Pro) Vlog Combo Accessories",
+    )
+
+
+def test_screen_film_and_sunshade_count_as_accessories():
+    assert is_accessory_mismatch(
+        "DJI OSMO Pocket 4P",
+        "2PCS Sunnylife Tempered Glass Film For DJI Osmo Pocket 4P/4/3 Remote Viewfinder",
+    )
+    assert is_accessory_mismatch(
+        "DJI OSMO Pocket 4P",
+        "For DJI Osmo Pocket 4P/4/3 Camera Quick Release Folding Sunshade Sun Hood Shield",
+    )
+
+
+def test_score_uses_comparable_price_baseline_not_accessory_baseline():
+    listings = [
+        Listing(
+            id="accessory",
+            source="ebay",
+            marketplace="eBay",
+            title="2PCS Tempered Glass Film For DJI Osmo Pocket 4P",
+            url="https://example.com/accessory",
+            price=9.98,
+            condition="new",
+        ),
+        Listing(
+            id="cheap-camera",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI Osmo Pocket Four Pro(4P) Standard Combo/Vlog Creator Combo",
+            url="https://example.com/cheap-camera",
+            price=759.0,
+            condition="new",
+        ),
+        Listing(
+            id="expensive-camera",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI Osmo Pocket 4P Standard Combo Action Camera Handheld Gimbal",
+            url="https://example.com/expensive-camera",
+            price=829.0,
+            condition="new",
+        ),
+    ]
+
+    scored = score_deals("DJI OSMO Pocket 4P", listings)
+
+    assert scored[0].listing.id == "cheap-camera"
+    assert scored[-1].listing.id == "accessory"
+
+
+def test_dedupe_keeps_cheapest_same_title():
+    listings = [
+        Listing(
+            id="1",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI Osmo Pocket 4P Standard Combo",
+            url="https://example.com/itm/1",
+            price=829.0,
+            condition="new",
+        ),
+        Listing(
+            id="2",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI Osmo Pocket 4P Standard Combo",
+            url="https://example.com/itm/2",
+            price=759.0,
+            condition="new",
+        ),
+    ]
+
+    deduped = dedupe_listings(listings)
+
+    assert len(deduped) == 1
+    assert deduped[0].id == "2"
 
 
 def test_score_deals_penalizes_model_variant_mismatch():

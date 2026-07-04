@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import time
 
@@ -9,7 +10,13 @@ import httpx
 
 from shopping_deals_mcp.config import Settings, settings
 from shopping_deals_mcp.models import Listing, SourceStatus
-from shopping_deals_mcp.pricing import parse_price
+from shopping_deals_mcp.pricing import (
+    dedupe_listings,
+    is_accessory_mismatch,
+    is_model_token_mismatch,
+    normalize_text,
+    parse_price,
+)
 from shopping_deals_mcp.sources.base import MarketplaceSource
 
 
@@ -58,10 +65,54 @@ class EbaySource(MarketplaceSource):
         if not token:
             return []
 
+        query_variants = _query_variants(query)
+        search_limit = min(max(max_results, 50), 200)
+        tasks = []
+        for variant in query_variants:
+            tasks.append(
+                self._search_once(
+                    token,
+                    variant,
+                    max_results=search_limit,
+                    price_min=price_min,
+                    price_max=price_max,
+                    condition=condition,
+                )
+            )
+            tasks.append(
+                self._search_once(
+                    token,
+                    variant,
+                    max_results=search_limit,
+                    price_min=price_min,
+                    price_max=price_max,
+                    condition=condition,
+                    sort="price",
+                )
+            )
+
+        results = await asyncio.gather(*tasks)
+        listings = dedupe_listings([listing for batch in results for listing in batch])
+        listings.sort(key=lambda listing: _candidate_sort_key(query, listing))
+        return listings[:max_results]
+
+    async def _search_once(
+        self,
+        token: str,
+        query: str,
+        *,
+        max_results: int,
+        price_min: float | None = None,
+        price_max: float | None = None,
+        condition: str = "any",
+        sort: str | None = None,
+    ) -> list[Listing]:
         params: dict[str, str] = {
             "q": query,
             "limit": str(min(max_results, 200)),
         }
+        if sort:
+            params["sort"] = sort
         filters: list[str] = []
         if price_min is not None or price_max is not None:
             filters.append(
@@ -231,3 +282,30 @@ def _shipping_text(item: dict) -> str | None:
     if cost is not None:
         return f"Shipping ${cost:.2f}"
     return option.get("shippingCostType")
+
+
+def _query_variants(query: str) -> list[str]:
+    normalized = normalize_text(query)
+    variants = [query]
+    if "pocket" in normalized and ("4p" in normalized or "four pro" in normalized):
+        variants.extend(
+            [
+                "DJI Osmo Pocket 4P",
+                "Osmo Pocket 4P",
+                "DJI Osmo Pocket Four Pro",
+                "Osmo Pocket Four Pro",
+                "DJI Osmo Pocket 4P Standard Combo",
+                "DJI Osmo Pocket 4P Vlog Combo",
+            ]
+        )
+    return list(dict.fromkeys(variants))
+
+
+def _candidate_sort_key(query: str, listing: Listing) -> tuple[bool, bool, bool, float, str]:
+    return (
+        is_accessory_mismatch(query, listing.title),
+        is_model_token_mismatch(query, listing.title),
+        listing.price is None,
+        listing.price if listing.price is not None else float("inf"),
+        listing.title,
+    )
