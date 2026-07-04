@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shopping-deals-mcp",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "EBAY_MARKETPLACE_ID": "EBAY_US",
+    "EBAY_USE_SANDBOX": "false",
+    "CRAIGSLIST_SITES": "newyork,sfbay,losangeles,chicago,houston",
+    "SHOPPING_ENABLE_AMAZON_SCRAPE": "true",
+    "SHOPPING_HTTP_TIMEOUT_SECONDS": "15",
+    "SHOPPING_MAX_RESULTS_PER_SOURCE": "25"
+  }
+}

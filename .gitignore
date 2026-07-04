@@ -1,5 +1,8 @@
 .DS_Store
 .env
+.dev.vars
+.wrangler/
+node_modules/
 .venv/
 __pycache__/
 *.py[cod]

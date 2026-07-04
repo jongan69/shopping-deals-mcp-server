@@ -53,6 +53,38 @@ Then connect an MCP client to:
 http://127.0.0.1:8000/mcp
 ```
 
+## Cloudflare Worker
+
+This repo also includes a TypeScript Worker implementation for remote MCP clients.
+
+```bash
+npm install
+cp .env .dev.vars
+npm run typecheck
+npm run dev -- --port 8787
+```
+
+Set production Worker secrets before deploying:
+
+```bash
+printf '%s' "$EBAY_APP_ID" | npx wrangler secret put EBAY_APP_ID
+printf '%s' "$EBAY_CERT_ID" | npx wrangler secret put EBAY_CERT_ID
+printf '%s' "$EBAY_DEV_ID" | npx wrangler secret put EBAY_DEV_ID
+npm run deploy
+```
+
+Current deployed MCP endpoint:
+
+```text
+https://shopping-deals-mcp.jonathang132298.workers.dev/mcp
+```
+
+Codex remote MCP registration:
+
+```bash
+codex mcp add shopping-deals-remote --url https://shopping-deals-mcp.jonathang132298.workers.dev/mcp
+```
+
 ## Example Tool Calls
 
 Find ranked deals:
@@ -86,3 +118,5 @@ pytest
 ## Notes
 
 This server is deliberately key-aware. Official APIs and shopping aggregators are more reliable than scraping, so unavailable sources report a clear setup requirement instead of failing noisily. The deal score is not a guarantee of authenticity, availability, warranty, or seller safety; use it as a triage signal and verify the listing before buying.
+
+Remote Worker verification on July 4, 2026 confirmed live MCP calls for eBay, Amazon, and OfferUp. Craigslist direct RSS returned HTTP 403 and the no-key Jina Reader fallback returned HTTP 429 from Cloudflare Worker egress, so Craigslist needs a paid/API-backed provider or a non-Worker fetch path before it can be considered fully remote-functional.
