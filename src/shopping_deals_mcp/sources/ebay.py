@@ -61,7 +61,6 @@ class EbaySource(MarketplaceSource):
         params: dict[str, str] = {
             "q": query,
             "limit": str(min(max_results, 200)),
-            "sort": "price",
         }
         filters: list[str] = []
         if price_min is not None or price_max is not None:

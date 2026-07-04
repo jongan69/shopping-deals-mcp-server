@@ -23,6 +23,29 @@ STOP_WORDS = {
     "open",
     "box",
 }
+ACCESSORY_TERMS = {
+    "adapter",
+    "cable",
+    "case",
+    "charger",
+    "charging",
+    "clip",
+    "connector",
+    "cord",
+    "cover",
+    "earpad",
+    "earpads",
+    "hinge",
+    "pads",
+    "part",
+    "parts",
+    "protector",
+    "repair",
+    "replacement",
+    "skin",
+    "sleeve",
+    "strap",
+}
 
 
 def parse_price(value: object) -> float | None:
@@ -133,15 +156,30 @@ def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
             elif "pickup" in shipping_text:
                 shipping_bonus = 2.0
 
+        accessory_mismatch = is_accessory_mismatch(query, listing.title)
+        accessory_penalty = 70.0 if accessory_mismatch else 0.0
+        if accessory_mismatch:
+            warnings.append("Looks like an accessory, repair part, or replacement component.")
+
         score = max(
             0.0,
-            min(100.0, price_score + (relevance * 22.0) + source_bonus + condition_bonus + shipping_bonus),
+            min(
+                100.0,
+                price_score
+                + (relevance * 22.0)
+                + source_bonus
+                + condition_bonus
+                + shipping_bonus
+                - accessory_penalty,
+            ),
         )
 
         if relevance < 0.35:
             warnings.append("Title match is weak; verify this is the exact product.")
         if listing.source == "craigslist":
             warnings.append("Local marketplace listing; verify seller identity and availability.")
+        if accessory_mismatch:
+            score = min(score, 30.0)
 
         rank_reason = _rank_reason(listing, low, avg, relevance)
         scored.append(
@@ -179,3 +217,10 @@ def _rank_reason(listing: Listing, low: float | None, avg: float | None, relevan
         pieces.append(f"condition: {listing.condition}")
 
     return "; ".join(pieces)
+
+
+def is_accessory_mismatch(query: str, title: str) -> bool:
+    query_tokens = set(normalize_text(query).split())
+    title_tokens = set(normalize_text(title).split())
+    accessory_hits = title_tokens & ACCESSORY_TERMS
+    return bool(accessory_hits and not accessory_hits <= query_tokens)

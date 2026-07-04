@@ -43,6 +43,7 @@ class Settings:
     ebay_access_token: str = os.getenv("EBAY_ACCESS_TOKEN", "")
     ebay_app_id: str = os.getenv("EBAY_APP_ID", "")
     ebay_cert_id: str = os.getenv("EBAY_CERT_ID", "")
+    ebay_dev_id: str = os.getenv("EBAY_DEV_ID", "")
     ebay_marketplace_id: str = os.getenv("EBAY_MARKETPLACE_ID", "EBAY_US")
     ebay_use_sandbox: bool = _env_bool("EBAY_USE_SANDBOX", False)
     craigslist_sites: tuple[str, ...] = tuple(

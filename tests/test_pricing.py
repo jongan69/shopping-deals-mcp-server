@@ -1,5 +1,5 @@
 from shopping_deals_mcp.models import Listing
-from shopping_deals_mcp.pricing import parse_price, product_key, score_deals
+from shopping_deals_mcp.pricing import is_accessory_mismatch, parse_price, product_key, score_deals
 
 
 def test_parse_price_handles_common_formats():
@@ -38,3 +38,31 @@ def test_score_deals_prefers_relevant_low_price():
 
     assert scored[0].listing.id == "1"
     assert scored[0].deal_score > scored[1].deal_score
+
+
+def test_score_deals_penalizes_accessory_mismatch():
+    listings = [
+        Listing(
+            id="1",
+            source="ebay",
+            marketplace="eBay",
+            title="USB charging cable for Sony WH-1000XM5 headphones",
+            url="https://example.com/1",
+            price=5.0,
+            condition="new",
+        ),
+        Listing(
+            id="2",
+            source="ebay",
+            marketplace="eBay",
+            title="Sony WH-1000XM5 wireless noise canceling headphones",
+            url="https://example.com/2",
+            price=199.0,
+            condition="used",
+        ),
+    ]
+
+    scored = score_deals("Sony WH-1000XM5 headphones", listings)
+
+    assert is_accessory_mismatch("Sony WH-1000XM5 headphones", listings[0].title)
+    assert scored[0].listing.id == "2"
