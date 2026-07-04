@@ -7,7 +7,14 @@ from collections import defaultdict
 
 from shopping_deals_mcp.config import settings
 from shopping_deals_mcp.models import PriceComparison, SearchResponse, SourceStatus
-from shopping_deals_mcp.pricing import dedupe_listings, product_key, score_deals
+from shopping_deals_mcp.pricing import (
+    dedupe_listings,
+    is_accessory_mismatch,
+    is_model_token_mismatch,
+    product_key,
+    score_deals,
+    title_similarity,
+)
 from shopping_deals_mcp.sources import build_sources
 
 
@@ -64,7 +71,16 @@ class ShoppingDealsService:
                 source_errors[source_name] = f"{type(exc).__name__}: {exc}"
 
         listings = dedupe_listings(all_listings)
-        listings.sort(key=lambda item: (item.price is None, item.price or float("inf"), item.title))
+        listings.sort(
+            key=lambda item: (
+                is_accessory_mismatch(query, item.title),
+                is_model_token_mismatch(query, item.title),
+                -title_similarity(query, item.title),
+                item.price is None,
+                item.price or float("inf"),
+                item.title,
+            )
+        )
         return SearchResponse(
             query=query,
             sources_requested=selected,

@@ -46,6 +46,7 @@ ACCESSORY_TERMS = {
     "hinge",
     "kit",
     "kits",
+    "kickstand",
     "lens",
     "magnetic",
     "mount",
@@ -270,7 +271,17 @@ def is_accessory_mismatch(query: str, title: str) -> bool:
 
 
 def is_model_token_mismatch(query: str, title: str) -> bool:
+    query_iphone_model = _phone_model_number(query, "iphone")
+    title_iphone_model = _phone_model_number(title, "iphone")
+    if query_iphone_model and title_iphone_model and query_iphone_model != title_iphone_model:
+        return True
+
     query_tokens = set(normalize_text(query).split())
     title_tokens = set(normalize_text(title).split())
     required_model_tokens = {token for token in query_tokens if MODEL_TOKEN_RE.fullmatch(token)}
     return bool(required_model_tokens - title_tokens)
+
+
+def _phone_model_number(text: str, family: str) -> str | None:
+    match = re.search(rf"\b{re.escape(family)}\s+(\d{{1,2}})\b", normalize_text(text))
+    return match.group(1) if match else None

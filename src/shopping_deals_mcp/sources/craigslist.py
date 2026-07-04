@@ -1,8 +1,9 @@
-"""Craigslist RSS source for local used deals."""
+"""Craigslist source for local used deals."""
 
 from __future__ import annotations
 
 import html
+import re
 import xml.etree.ElementTree as ET
 from urllib.parse import urlencode
 
@@ -27,7 +28,7 @@ class CraigslistSource(MarketplaceSource):
             display_name=self.display_name,
             available=bool(self.config.craigslist_sites),
             requires=[],
-            notes=f"Configured sites: {', '.join(self.config.craigslist_sites)}",
+            notes=f"Configured sites: {', '.join(self.config.craigslist_sites)}. Uses Craigslist search HTML.",
         )
 
     async def search(
@@ -51,7 +52,7 @@ class CraigslistSource(MarketplaceSource):
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
             ),
-            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
         async with httpx.AsyncClient(
@@ -63,7 +64,7 @@ class CraigslistSource(MarketplaceSource):
 
         listings: list[Listing] = []
         for site, text in responses:
-            listings.extend(_parse_rss(site, text, max_results))
+            listings.extend(_parse_html(site, text, max_results))
 
         listings = [
             listing
@@ -87,7 +88,6 @@ async def _gather_sites(
     for site in sites:
         params = {
             "query": query,
-            "format": "rss",
             "sort": "date",
         }
         if price_min is not None:
@@ -137,3 +137,41 @@ def _parse_rss(site: str, rss_text: str, max_results: int) -> list[Listing]:
             )
         )
     return [listing for listing in listings if listing.title and listing.url]
+
+
+def _parse_html(site: str, html_text: str, max_results: int) -> list[Listing]:
+    cards = re.findall(
+        r"<li[^>]+class=[\"'][^\"']*cl-static-search-result[^\"']*[\"'][^>]*>([\s\S]*?)</li>",
+        html_text,
+    )
+    listings: list[Listing] = []
+    for card in cards[:max_results]:
+        title = html.unescape(_strip_tags(_match(card, r"<div[^>]+class=[\"']title[\"'][^>]*>([\s\S]*?)</div>"))).strip()
+        link = html.unescape(_match(card, r"<a[^>]+href=[\"']([^\"']+)[\"']"))
+        price_text = html.unescape(_strip_tags(_match(card, r"<div[^>]+class=[\"']price[\"'][^>]*>([\s\S]*?)</div>"))).strip()
+        location = html.unescape(_strip_tags(_match(card, r"<div[^>]+class=[\"']location[\"'][^>]*>([\s\S]*?)</div>"))).strip()
+        listing_id = link.rstrip("/").split("/")[-1] if link else title
+        listings.append(
+            Listing(
+                id=listing_id,
+                source=CraigslistSource.name,
+                marketplace=f"Craigslist {site}",
+                title=title,
+                url=link,
+                price=0.0 if price_text.lower() == "free" else parse_price(price_text),
+                currency="USD",
+                condition="used",
+                location=f"{site}: {location}" if location else site,
+                shipping="Local pickup",
+            )
+        )
+    return [listing for listing in listings if listing.title and listing.url]
+
+
+def _match(text: str, pattern: str) -> str:
+    found = re.search(pattern, text)
+    return found.group(1) if found else ""
+
+
+def _strip_tags(value: str) -> str:
+    return re.sub(r"<[^>]+>", " ", value).replace("\n", " ").strip()

@@ -69,6 +69,7 @@ const ACCESSORY_TERMS = new Set([
   "hood",
   "kit",
   "kits",
+  "kickstand",
   "lens",
   "magnetic",
   "mount",
@@ -252,7 +253,7 @@ function listSources(env: Env) {
       display_name: "Craigslist",
       available: true,
       requires: [],
-      notes: `Configured sites: ${craigslistSites(env).join(", ")}. Falls back to Jina Reader when Craigslist blocks direct RSS.`,
+      notes: `Configured sites: ${craigslistSites(env).join(", ")}. Uses Craigslist search HTML with structured listing data.`,
     },
     {
       name: "offerup",
@@ -315,7 +316,7 @@ async function searchProducts(
 
   const results = await Promise.all(tasks);
   const listings = dedupeListings(results.flatMap((result) => result.listings));
-  listings.sort((a, b) => priceSort(a) - priceSort(b) || a.title.localeCompare(b.title));
+  listings.sort((a, b) => searchResultSort(options.query, a, b));
 
   return {
     query: options.query,
@@ -521,28 +522,30 @@ async function craigslistSearch(env: Env, query: string, limit: number, priceMin
   const perSiteLimit = Math.max(1, Math.ceil(limit / Math.max(sites.length, 1)));
 
   for (const site of sites) {
-    const params = new URLSearchParams({ query, format: "rss", sort: "date" });
+    const params = new URLSearchParams({ query, sort: "date" });
     if (priceMin !== undefined) params.set("min_price", String(Math.floor(priceMin)));
     if (priceMax !== undefined) params.set("max_price", String(Math.floor(priceMax)));
     const response = await timedFetch(env, `https://${site}.craigslist.org/search/sss?${params}`, {
-      headers: browserHeaders("application/rss+xml, application/xml, text/xml, */*"),
+      headers: browserHeaders("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
     });
     if (!response.ok) {
       errors.push(`${site}: HTTP ${response.status}`);
       continue;
     }
-    listings.push(...parseCraigslistRss(site, await response.text(), perSiteLimit));
+    const parsed = parseCraigslistHtml(site, await response.text(), perSiteLimit);
+    if (!parsed.length) errors.push(`${site}: no listings parsed from HTML`);
+    listings.push(...parsed);
     if (listings.length >= limit) break;
   }
   if (!listings.length && errors.length) {
-    const fallback = await craigslistJinaSearch(env, query, limit, priceMin, priceMax);
-    if (fallback.length) return fallback;
+    const fallback = await craigslistRssOrJinaSearch(env, query, limit, priceMin, priceMax);
+    if (fallback.length) return applyPriceBounds(fallback, priceMin, priceMax).slice(0, limit);
   }
   if (!listings.length && errors.length) throw new Error(errors.join("; "));
-  return listings.slice(0, limit);
+  return applyPriceBounds(dedupeListings(listings), priceMin, priceMax).slice(0, limit);
 }
 
-async function craigslistJinaSearch(
+async function craigslistRssOrJinaSearch(
   env: Env,
   query: string,
   limit: number,
@@ -554,6 +557,19 @@ async function craigslistJinaSearch(
   const perSiteLimit = Math.max(limit, Math.ceil(limit / Math.max(sites.length, 1)));
   const errors: string[] = [];
   for (const site of sites) {
+    const rssParams = new URLSearchParams({ query, format: "rss", sort: "date" });
+    if (priceMin !== undefined) rssParams.set("min_price", String(Math.floor(priceMin)));
+    if (priceMax !== undefined) rssParams.set("max_price", String(Math.floor(priceMax)));
+    const rssResponse = await timedFetch(env, `https://${site}.craigslist.org/search/sss?${rssParams}`, {
+      headers: browserHeaders("application/rss+xml, application/xml, text/xml, */*"),
+    });
+    if (rssResponse.ok) {
+      listings.push(...parseCraigslistRss(site, await rssResponse.text(), perSiteLimit));
+      if (listings.length >= limit) break;
+      continue;
+    }
+    errors.push(`${site} RSS fallback: HTTP ${rssResponse.status}`);
+
     const params = new URLSearchParams({ query, sort: "date" });
     const jinaUrl = `https://r.jina.ai/http://${site}.craigslist.org/search/sss?${params}`;
     const response = await timedFetch(env, jinaUrl, {
@@ -577,6 +593,29 @@ async function craigslistJinaSearch(
   const deduped = dedupeListings(listings).slice(0, limit);
   if (!deduped.length && errors.length) throw new Error(errors.join("; "));
   return deduped;
+}
+
+function parseCraigslistHtml(site: string, html: string, limit: number): Listing[] {
+  const cards = [...html.matchAll(/<li[^>]+class=["'][^"']*cl-static-search-result[^"']*["'][^>]*>([\s\S]*?)<\/li>/g)];
+  return cards.slice(0, limit).map((found) => {
+    const card = found[1] ?? "";
+    const title = decodeHtml(stripTags(match(card, /<div[^>]+class=["']title["'][^>]*>([\s\S]*?)<\/div>/))).trim();
+    const url = decodeHtml(match(card, /<a[^>]+href=["']([^"']+)["']/));
+    const priceText = decodeHtml(stripTags(match(card, /<div[^>]+class=["']price["'][^>]*>([\s\S]*?)<\/div>/))).trim();
+    const location = decodeHtml(stripTags(match(card, /<div[^>]+class=["']location["'][^>]*>([\s\S]*?)<\/div>/))).trim();
+    return {
+      id: url.split("/").pop() || title,
+      source: "craigslist",
+      marketplace: `Craigslist ${site}`,
+      title,
+      url,
+      price: priceText.toLowerCase() === "free" ? 0 : parsePrice(priceText),
+      currency: "USD",
+      condition: "used",
+      location: location ? `${site}: ${location}` : site,
+      shipping: "Local pickup",
+    };
+  }).filter((listing) => listing.title && listing.url);
 }
 
 function parseCraigslistRss(site: string, rss: string, limit: number): Listing[] {
@@ -735,9 +774,18 @@ function isAccessoryMismatch(query: string, title: string): boolean {
 }
 
 function isModelTokenMismatch(query: string, title: string): boolean {
+  const queryIphoneModel = phoneModelNumber(query, "iphone");
+  const titleIphoneModel = phoneModelNumber(title, "iphone");
+  if (queryIphoneModel && titleIphoneModel && queryIphoneModel !== titleIphoneModel) return true;
+
   const queryTokens = normalizeText(query).split(/\s+/).filter(Boolean);
   const titleTokens = new Set(normalizeText(title).split(/\s+/).filter(Boolean));
   return queryTokens.some((token) => /\d/.test(token) && token.length >= 2 && !titleTokens.has(token));
+}
+
+function phoneModelNumber(text: string, family: string): string | null {
+  const found = normalizeText(text).match(new RegExp(`\\b${family}\\s+(\\d{1,2})\\b`));
+  return found?.[1] ?? null;
 }
 
 function titleSimilarity(query: string, title: string): number {
@@ -793,6 +841,12 @@ function locationText(payload: Record<string, unknown> | null): string | null {
   return parts.length ? parts.join(", ") : null;
 }
 
+function craigslistAddress(site: string, payload: Record<string, unknown> | null): string {
+  if (!payload) return site;
+  const parts = [payload.addressLocality, payload.addressRegion].filter(Boolean).map(String);
+  return parts.length ? `${site}: ${parts.join(", ")}` : site;
+}
+
 function shippingText(item: Record<string, unknown>): string | null {
   const options = Array.isArray(item.shippingOptions) ? item.shippingOptions : [];
   const first = objectValue(options[0]);
@@ -821,12 +875,27 @@ function ebayCandidateSort(query: string, a: Listing, b: Listing): number {
     a.title.localeCompare(b.title);
 }
 
+function searchResultSort(query: string, a: Listing, b: Listing): number {
+  return Number(isAccessoryMismatch(query, a.title)) - Number(isAccessoryMismatch(query, b.title)) ||
+    Number(isModelTokenMismatch(query, a.title)) - Number(isModelTokenMismatch(query, b.title)) ||
+    titleSimilarity(query, b.title) - titleSimilarity(query, a.title) ||
+    priceSort(a) - priceSort(b) ||
+    a.title.localeCompare(b.title);
+}
+
 function priceSort(listing: Listing): number {
   return priceSortValue(listing.price);
 }
 
 function priceSortValue(price: number | null): number {
   return price === null ? Number.POSITIVE_INFINITY : price;
+}
+
+function applyPriceBounds(listings: Listing[], priceMin?: number, priceMax?: number): Listing[] {
+  return listings.filter((listing) =>
+    (listing.price === null || priceMin === undefined || listing.price >= priceMin) &&
+    (listing.price === null || priceMax === undefined || listing.price <= priceMax),
+  );
 }
 
 function cleanAmazonTitle(value: string): string {

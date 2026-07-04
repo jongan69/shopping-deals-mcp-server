@@ -119,4 +119,4 @@ pytest
 
 This server is deliberately key-aware. Official APIs and shopping aggregators are more reliable than scraping, so unavailable sources report a clear setup requirement instead of failing noisily. The deal score is not a guarantee of authenticity, availability, warranty, or seller safety; use it as a triage signal and verify the listing before buying.
 
-Remote Worker verification on July 4, 2026 confirmed live MCP calls for eBay, Amazon, and OfferUp. Craigslist direct RSS returned HTTP 403 and the no-key Jina Reader fallback returned HTTP 429 from Cloudflare Worker egress, so Craigslist needs a paid/API-backed provider or a non-Worker fetch path before it can be considered fully remote-functional.
+Remote Worker verification on July 4, 2026 confirmed live MCP calls for eBay, Amazon, Craigslist, and OfferUp. Craigslist RSS returned HTTP 403 from Worker egress, so the Worker uses Craigslist's static search HTML cards instead.
