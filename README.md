@@ -285,6 +285,10 @@ npm install
 npm run typecheck
 ```
 
+## License
+
+MIT
+
 ## Notes And Limitations
 
 - Deal scores are triage signals, not purchase guarantees.
