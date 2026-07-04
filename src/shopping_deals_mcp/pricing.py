@@ -23,6 +23,7 @@ STOP_WORDS = {
     "open",
     "box",
 }
+MODEL_TOKEN_RE = re.compile(r"(?=.*\d)[a-z0-9]{2,}")
 ACCESSORY_TERMS = {
     "adapter",
     "cable",
@@ -35,7 +36,16 @@ ACCESSORY_TERMS = {
     "cover",
     "earpad",
     "earpads",
+    "filter",
+    "filters",
+    "grip",
+    "handle",
     "hinge",
+    "kit",
+    "kits",
+    "lens",
+    "magnetic",
+    "mount",
     "pads",
     "part",
     "parts",
@@ -44,7 +54,9 @@ ACCESSORY_TERMS = {
     "replacement",
     "skin",
     "sleeve",
+    "stand",
     "strap",
+    "tripod",
 }
 
 
@@ -160,6 +172,10 @@ def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
         accessory_penalty = 70.0 if accessory_mismatch else 0.0
         if accessory_mismatch:
             warnings.append("Looks like an accessory, repair part, or replacement component.")
+        model_mismatch = is_model_token_mismatch(query, listing.title)
+        model_penalty = 65.0 if model_mismatch else 0.0
+        if model_mismatch:
+            warnings.append("Missing an exact model/variant token from the query.")
 
         score = max(
             0.0,
@@ -170,7 +186,8 @@ def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
                 + source_bonus
                 + condition_bonus
                 + shipping_bonus
-                - accessory_penalty,
+                - accessory_penalty
+                - model_penalty,
             ),
         )
 
@@ -180,6 +197,8 @@ def score_deals(query: str, listings: list[Listing]) -> list[DealResult]:
             warnings.append("Local marketplace listing; verify seller identity and availability.")
         if accessory_mismatch:
             score = min(score, 30.0)
+        if model_mismatch:
+            score = min(score, 35.0)
 
         rank_reason = _rank_reason(listing, low, avg, relevance)
         scored.append(
@@ -223,4 +242,13 @@ def is_accessory_mismatch(query: str, title: str) -> bool:
     query_tokens = set(normalize_text(query).split())
     title_tokens = set(normalize_text(title).split())
     accessory_hits = title_tokens & ACCESSORY_TERMS
-    return bool(accessory_hits and not accessory_hits <= query_tokens)
+    title_text = normalize_text(title)
+    compatible_language = "compatible with" in title_text or "for " in title_text
+    return bool(accessory_hits and (compatible_language or not accessory_hits <= query_tokens))
+
+
+def is_model_token_mismatch(query: str, title: str) -> bool:
+    query_tokens = set(normalize_text(query).split())
+    title_tokens = set(normalize_text(title).split())
+    required_model_tokens = {token for token in query_tokens if MODEL_TOKEN_RE.fullmatch(token)}
+    return bool(required_model_tokens - title_tokens)

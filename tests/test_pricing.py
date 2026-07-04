@@ -1,5 +1,11 @@
 from shopping_deals_mcp.models import Listing
-from shopping_deals_mcp.pricing import is_accessory_mismatch, parse_price, product_key, score_deals
+from shopping_deals_mcp.pricing import (
+    is_accessory_mismatch,
+    is_model_token_mismatch,
+    parse_price,
+    product_key,
+    score_deals,
+)
 
 
 def test_parse_price_handles_common_formats():
@@ -65,4 +71,61 @@ def test_score_deals_penalizes_accessory_mismatch():
     scored = score_deals("Sony WH-1000XM5 headphones", listings)
 
     assert is_accessory_mismatch("Sony WH-1000XM5 headphones", listings[0].title)
+    assert scored[0].listing.id == "2"
+
+
+def test_score_deals_penalizes_compatible_accessory_with_exact_model_token():
+    listings = [
+        Listing(
+            id="1",
+            source="amazon",
+            marketplace="Amazon",
+            title="Split Filter Kit for DJI Osmo Pocket 4P",
+            url="https://example.com/1",
+            price=45.99,
+            condition="new",
+        ),
+        Listing(
+            id="2",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI Osmo Pocket 4P Standard Combo Action Camera Handheld Gimbal",
+            url="https://example.com/2",
+            price=829.0,
+            condition="new",
+        ),
+    ]
+
+    scored = score_deals("DJI OSMO Pocket 4P", listings)
+
+    assert is_accessory_mismatch("DJI OSMO Pocket 4P", listings[0].title)
+    assert scored[0].listing.id == "2"
+
+
+def test_score_deals_penalizes_model_variant_mismatch():
+    listings = [
+        Listing(
+            id="1",
+            source="offerup",
+            marketplace="OfferUp",
+            title="DJI OSMO POCKET 4 - CREATOR COMBO",
+            url="https://example.com/1",
+            price=949.0,
+            condition="used",
+        ),
+        Listing(
+            id="2",
+            source="ebay",
+            marketplace="eBay",
+            title="DJI OSMO Pocket 4P Creator Combo",
+            url="https://example.com/2",
+            price=1299.0,
+            condition="new",
+        ),
+    ]
+
+    scored = score_deals("DJI OSMO Pocket 4P", listings)
+
+    assert is_model_token_mismatch("DJI OSMO Pocket 4P", listings[0].title)
+    assert not is_model_token_mismatch("DJI OSMO Pocket 4P", listings[1].title)
     assert scored[0].listing.id == "2"

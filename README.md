@@ -18,6 +18,7 @@ It replaces the old FastAPI marketplace app shape with a focused MCP surface:
 | eBay Browse API | Official eBay item search and detail lookups | `EBAY_ACCESS_TOKEN` or `EBAY_APP_ID` + `EBAY_CERT_ID` |
 | eBay public search | No-key eBay search fallback | none |
 | Craigslist RSS | Local used marketplace listings | none, configure `CRAIGSLIST_SITES` |
+| OfferUp public search | Local used marketplace listings | none |
 | Amazon public search | Amazon product search HTML parser | `SHOPPING_ENABLE_AMAZON_SCRAPE=true`; may be blocked |
 
 ## Setup

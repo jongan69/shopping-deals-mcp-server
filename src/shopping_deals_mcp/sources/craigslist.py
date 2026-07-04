@@ -83,6 +83,7 @@ async def _gather_sites(
     price_max: float | None,
 ) -> list[tuple[str, str]]:
     results: list[tuple[str, str]] = []
+    errors: list[str] = []
     for site in sites:
         params = {
             "query": query,
@@ -94,9 +95,15 @@ async def _gather_sites(
         if price_max is not None:
             params["max_price"] = str(int(price_max))
         url = f"https://{site}.craigslist.org/search/sss?{urlencode(params)}"
-        response = await client.get(url)
-        response.raise_for_status()
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            errors.append(f"{site}: {exc}")
+            continue
         results.append((site, response.text[: per_site_limit * 5000]))
+    if not results and errors:
+        raise RuntimeError("; ".join(errors))
     return results
 
 

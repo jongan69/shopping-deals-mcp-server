@@ -58,12 +58,13 @@ class AmazonSearchSource(MarketplaceSource):
         listings: list[Listing] = []
         for card in soup.select('[data-component-type="s-search-result"]')[:max_results]:
             asin = card.get("data-asin")
-            title_el = card.select_one("h2 span")
-            href_el = card.select_one("h2 a")
+            title_link = card.select_one("a.a-link-normal.s-line-clamp-2")
+            title_el = title_link or card.select_one('[data-cy="title-recipe"]') or card.select_one("h2 span")
+            href_el = title_link or card.select_one("h2 a")
             price_el = card.select_one(".a-price .a-offscreen")
             image_el = card.select_one("img.s-image")
             rating_el = card.select_one(".a-icon-alt")
-            title = title_el.get_text(" ", strip=True) if title_el else ""
+            title = _clean_title(title_el.get_text(" ", strip=True) if title_el else "")
             href = href_el.get("href") if href_el else ""
             price = parse_price(price_el.get_text(" ", strip=True) if price_el else None)
             if price is not None:
@@ -90,3 +91,15 @@ class AmazonSearchSource(MarketplaceSource):
             )
 
         return [listing for listing in listings if listing.title and listing.url]
+
+
+def _clean_title(value: str) -> str:
+    value = value.strip()
+    prefixes = [
+        "Sponsored Sponsored You’re seeing this ad based on the product’s relevance to your search query. Leave ad feedback ",
+        "Sponsored Sponsored You're seeing this ad based on the product's relevance to your search query. Leave ad feedback ",
+    ]
+    for prefix in prefixes:
+        if value.startswith(prefix):
+            return value[len(prefix) :].strip()
+    return value
