@@ -50,6 +50,41 @@ Scraped/public sources can change or block automated traffic. Official APIs are 
 - Optional: SerpApi key for broad Google Shopping coverage
 - Optional: Cloudflare account for remote hosting
 
+## Use The Hosted MCP Server
+
+You can use the public hosted MCP server without cloning this repo:
+
+```text
+https://shopping-deals-mcp.jonathang132298.workers.dev/mcp
+```
+
+Add it to Codex:
+
+```bash
+codex mcp add shopping-deals-remote --url https://shopping-deals-mcp.jonathang132298.workers.dev/mcp
+codex mcp get shopping-deals-remote
+```
+
+Use it from any MCP client that supports Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "shopping-deals": {
+      "url": "https://shopping-deals-mcp.jonathang132298.workers.dev/mcp"
+    }
+  }
+}
+```
+
+Health and source status:
+
+```text
+https://shopping-deals-mcp.jonathang132298.workers.dev/health
+```
+
+The hosted Worker uses the maintainer's configured API keys and public marketplace parsers. If you want to use your own eBay, SerpApi, or Cloudflare account, follow the local setup or deployment steps below.
+
 ## Quick Start: Local MCP Server
 
 ```bash
@@ -103,7 +138,7 @@ codex mcp add shopping-deals -- /absolute/path/to/shopping-deals-mcp-server/.ven
 Remote Streamable HTTP server:
 
 ```bash
-codex mcp add shopping-deals-remote --url https://your-worker.your-subdomain.workers.dev/mcp
+codex mcp add shopping-deals-remote --url https://shopping-deals-mcp.jonathang132298.workers.dev/mcp
 ```
 
 Verify:
@@ -130,7 +165,7 @@ Use the local stdio command:
 Or use a remote Streamable HTTP endpoint:
 
 ```text
-https://your-worker.your-subdomain.workers.dev/mcp
+https://shopping-deals-mcp.jonathang132298.workers.dev/mcp
 ```
 
 ## Cloudflare Worker Deployment
