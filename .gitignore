@@ -1,6 +1,7 @@
 .DS_Store
 .env
 .dev.vars
+.shopping-deals/
 .wrangler/
 node_modules/
 .venv/

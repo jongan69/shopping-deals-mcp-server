@@ -77,6 +77,10 @@ class Settings:
         "SHOPPING_ESTIMATED_TAX_RATE_PERCENT"
     )
     tax_shipping_by_default: bool = _env_bool("SHOPPING_TAX_SHIPPING", True)
+    resale_store_path: str = os.getenv(
+        "SHOPPING_RESALE_STORE_PATH",
+        ".shopping-deals/resale-business.json",
+    )
 
 
 settings = Settings()

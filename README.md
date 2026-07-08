@@ -8,6 +8,8 @@ It is built for agents that need to answer questions like:
 - "Compare exact-model prices across marketplaces."
 - "Avoid accessory listings, wrong variants, and fake low prices with high shipping."
 - "Estimate tax and sort by final landed cost."
+- "Find marketplace items I can buy and flip profitably on eBay."
+- "Track resale leads, inventory, listed items, sold items, and business metrics."
 
 ## What It Does
 
@@ -16,6 +18,8 @@ It is built for agents that need to answer questions like:
 - Separates item price, shipping cost, shipped total, estimated tax, and estimated final total.
 - Penalizes accessories, parts, and wrong model variants.
 - Handles edge cases like `Pocket 4P` vs `Pocket 4`.
+- Scores reseller/arbitrage opportunities using eBay comps, estimated fees, shipping, tax, ROI, and risk.
+- Tracks a simple resale pipeline: leads, purchases, inventory, listings, sold items, and realized profit.
 - Can run locally over stdio or remotely as a Cloudflare Worker MCP endpoint.
 
 ## MCP Tools
@@ -28,6 +32,16 @@ It is built for agents that need to answer questions like:
 | `find_cheapest_offers` | Filter exact-model offers and sort by shipped total plus estimated tax when supplied. |
 | `compare_prices` | Group comparable listings and summarize observed price ranges. |
 | `get_listing_details` | Fetch source-specific listing details where supported. |
+| `get_ebay_sold_comps` | Estimate resale value from eBay comps. Currently returns active-listing comps as a labeled proxy, not fabricated sold data. |
+| `calculate_resale_profit` | Calculate eBay-style flip profit, ROI, fees, tax, break-even sale price, and max buy price. |
+| `find_arbitrage_opportunities` | Search buy-side marketplaces and rank listings that may be profitable to resell on eBay. |
+| `draft_ebay_listing` | Draft an eBay title, description, price hint, shipping guidance, and photo/disclosure checklist. |
+| `save_resale_lead` | Save an arbitrage lead into the reseller pipeline. |
+| `update_resale_lead_status` | Move a lead through `watching`, `contacted`, `offer_made`, `purchased`, `listed`, `sold`, or `rejected`. |
+| `create_inventory_item` | Create a purchased item for inventory tracking. |
+| `mark_inventory_listed` | Mark inventory as listed for sale. |
+| `mark_inventory_sold` | Mark inventory sold and calculate realized profit. |
+| `calculate_business_metrics` | Summarize leads, inventory, invested cash, sold revenue, realized profit, and ROI. |
 
 ## Sources
 
@@ -85,6 +99,8 @@ https://shopping-deals-mcp.jonathang132298.workers.dev/health
 
 The hosted Worker uses the maintainer's configured API keys and public marketplace parsers. If you want to use your own eBay, SerpApi, or Cloudflare account, follow the local setup or deployment steps below.
 
+The hosted Worker exposes the reseller tools. Stateful business tools require the Worker's `RESALE_KV` binding; if a deployment has no KV binding, stateless tools such as `find_arbitrage_opportunities`, `calculate_resale_profit`, `get_ebay_sold_comps`, and `draft_ebay_listing` still work, while lead/inventory tools return a clear persistence configuration error.
+
 ## Quick Start: Local MCP Server
 
 ```bash
@@ -107,6 +123,7 @@ EBAY_USE_SANDBOX=false
 SHOPPING_ENABLE_AMAZON_SCRAPE=true
 SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE=40.7128
 SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE=-74.0060
+SHOPPING_RESALE_STORE_PATH=.shopping-deals/resale-business.json
 ```
 
 Run over stdio:
@@ -204,6 +221,25 @@ printf '%s' "$EBAY_CERT_ID" | npx wrangler secret put EBAY_CERT_ID
 printf '%s' "$EBAY_DEV_ID" | npx wrangler secret put EBAY_DEV_ID
 ```
 
+Create and bind KV for resale lead/inventory persistence:
+
+```bash
+npx wrangler kv namespace create RESALE_KV
+```
+
+Add the returned namespace ID to `wrangler.jsonc`:
+
+```json
+{
+  "kv_namespaces": [
+    {
+      "binding": "RESALE_KV",
+      "id": "your-kv-namespace-id"
+    }
+  ]
+}
+```
+
 Deploy:
 
 ```bash
@@ -278,6 +314,66 @@ Find ranked deals across marketplaces:
 }
 ```
 
+Find possible eBay flips:
+
+```json
+{
+  "query": "Sony a6700 camera body",
+  "buy_sources": ["facebook_marketplace", "craigslist", "offerup", "ebay"],
+  "location": "40.7128,-74.0060",
+  "max_results": 10,
+  "max_results_per_source": 25,
+  "price_max": 700,
+  "min_profit": 75,
+  "min_roi_percent": 20,
+  "purchase_tax_rate_percent": 8.875,
+  "outbound_shipping": 18
+}
+```
+
+Calculate resale profit directly:
+
+```json
+{
+  "purchase_price": 500,
+  "expected_sale_price": 775,
+  "inbound_shipping": 0,
+  "outbound_shipping": 18,
+  "purchase_tax_rate_percent": 8.875,
+  "platform_fee_percent": 13.25,
+  "packing_cost": 2
+}
+```
+
+Save a lead and track it through inventory:
+
+```json
+{
+  "lead": {
+    "title": "Sony a6700 camera body",
+    "source": "facebook_marketplace",
+    "url": "https://www.facebook.com/marketplace/item/example",
+    "asking_price": 575,
+    "expected_sale_price": 775,
+    "status": "watching"
+  }
+}
+```
+
+Then use:
+
+- `update_resale_lead_status`
+- `create_inventory_item`
+- `mark_inventory_listed`
+- `mark_inventory_sold`
+- `calculate_business_metrics`
+
+## Reselling Notes
+
+`get_ebay_sold_comps` is intentionally conservative: today it uses active eBay listing comps as a clearly labeled proxy because the current public eBay Browse API integration does not provide completed/sold listing data. Active comps are useful for initial triage, but confirmed sold comps are better for pricing and sell-through confidence. If you have access to a completed-listing data provider, add it as a dedicated source and keep the `basis` field explicit.
+
+The arbitrage score is a triage signal. Before buying, verify exact model, condition, serial/authenticity, locks/accounts, missing accessories, seller reputation, local safety, shipping dimensions, return risk, and final marketplace fees.
+
 Search Facebook Marketplace near New York City:
 
 ```json
@@ -320,6 +416,8 @@ Compare prices:
 | `SHOPPING_MAX_RESULTS_PER_SOURCE` | optional | Default per-source search size. |
 | `SHOPPING_ESTIMATED_TAX_RATE_PERCENT` | optional | Default tax estimate rate. |
 | `SHOPPING_TAX_SHIPPING` | optional | Whether shipping is included in estimated tax base. Defaults to `true`. |
+| `SHOPPING_RESALE_STORE_PATH` | optional | Local JSON path for leads and inventory. Defaults to `.shopping-deals/resale-business.json`. |
+| `RESALE_KV` | optional | Cloudflare KV binding for hosted lead/inventory persistence. |
 
 ## Development
 
@@ -345,8 +443,10 @@ MIT
 ## Notes And Limitations
 
 - Deal scores are triage signals, not purchase guarantees.
+- Arbitrage scores are triage signals, not guarantees of sell-through, profit, authenticity, or buyer demand.
 - Always verify seller reputation, return policy, warranty, shipping, taxes, and authenticity before buying.
 - Amazon, Craigslist, Facebook Marketplace, and OfferUp public parsers may break if those sites change markup or block traffic.
 - Facebook Marketplace support is experimental. It uses Facebook's public Marketplace web feed with an anonymous page token and requires a local search center.
 - Craigslist RSS returns HTTP 403 from Cloudflare Worker egress, so the Worker uses Craigslist static search HTML cards.
 - Tax is estimated from a supplied rate. Final checkout tax may differ.
+- eBay sold-comps support currently uses active listing comps as a labeled proxy until a true completed/sold-listing data provider is configured.

@@ -18,6 +18,7 @@ type Env = {
   SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE?: string;
   SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE?: string;
   SHOPPING_FACEBOOK_MARKETPLACE_RADIUS_KM?: string;
+  RESALE_KV?: KVNamespace;
 };
 
 type Listing = {
@@ -50,6 +51,11 @@ type SearchResponse = {
   source_errors: Record<string, string>;
   total_results: number;
   listings: Listing[];
+};
+
+type ResaleData = {
+  leads: Record<string, Record<string, unknown>>;
+  inventory: Record<string, Record<string, unknown>>;
 };
 
 const SOURCE_NAMES = ["ebay", "facebook_marketplace", "craigslist", "offerup", "amazon"] as const;
@@ -101,6 +107,10 @@ const ACCESSORY_TERMS = new Set([
   "tripod",
   "viewfinder",
 ]);
+const LEAD_STATUSES = new Set(["watching", "contacted", "offer_made", "purchased", "listed", "sold", "rejected"]);
+const DEFAULT_EBAY_FINAL_VALUE_FEE_PERCENT = 13.25;
+const DEFAULT_PAYMENT_FIXED_FEE = 0.40;
+const DEFAULT_PACKING_COST = 2.0;
 
 const toolText = (payload: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
@@ -271,6 +281,209 @@ function createServer(env: Env) {
     },
   );
 
+  server.tool(
+    "get_ebay_sold_comps",
+    "Estimate resale value from eBay comps. Returns active eBay listing comps as a labeled proxy when true sold-comps data is unavailable.",
+    {
+      query: z.string().min(1),
+      max_results: z.number().int().positive().optional(),
+      condition: z.string().optional(),
+    },
+    async (args) => {
+      const response = await searchProducts(env, {
+        query: args.query,
+        sources: ["ebay"],
+        maxResultsPerSource: Math.max(args.max_results ?? 20, 25),
+        condition: args.condition ?? "any",
+      });
+      return toolText({
+        ...buildResaleComps(args.query, response.listings, args.max_results ?? 20),
+        searched_at: response.searched_at,
+        source_errors: response.source_errors,
+      });
+    },
+  );
+
+  server.tool(
+    "calculate_resale_profit",
+    "Calculate net profit, ROI, break-even sale price, and target buy price for a resale flip.",
+    {
+      purchase_price: z.number().nonnegative(),
+      expected_sale_price: z.number().nonnegative(),
+      inbound_shipping: z.number().nonnegative().optional(),
+      outbound_shipping: z.number().nonnegative().optional(),
+      purchase_tax_rate_percent: z.number().nonnegative().optional(),
+      platform_fee_percent: z.number().nonnegative().optional(),
+      promoted_listing_percent: z.number().nonnegative().optional(),
+      payment_fixed_fee: z.number().nonnegative().optional(),
+      packing_cost: z.number().nonnegative().optional(),
+      misc_cost: z.number().nonnegative().optional(),
+      buyer_shipping_charged: z.number().nonnegative().optional(),
+    },
+    async (args) => toolText(calculateResaleProfit(env, args)),
+  );
+
+  server.tool(
+    "find_arbitrage_opportunities",
+    "Find buy-side listings that may be profitable to flip on eBay.",
+    {
+      query: z.string().min(1),
+      buy_sources: z.array(z.string()).optional(),
+      max_results: z.number().int().positive().optional(),
+      max_results_per_source: z.number().int().positive().optional(),
+      location: z.string().optional(),
+      condition: z.string().optional(),
+      price_max: z.number().optional(),
+      min_profit: z.number().optional(),
+      min_roi_percent: z.number().optional(),
+      purchase_tax_rate_percent: z.number().nonnegative().optional(),
+      outbound_shipping: z.number().nonnegative().optional(),
+      platform_fee_percent: z.number().nonnegative().optional(),
+      promoted_listing_percent: z.number().nonnegative().optional(),
+      packing_cost: z.number().nonnegative().optional(),
+    },
+    async (args) => {
+      const compResponse = await searchProducts(env, {
+        query: args.query,
+        sources: ["ebay"],
+        maxResultsPerSource: 30,
+        condition: args.condition ?? "any",
+      });
+      const resaleComps = {
+        ...buildResaleComps(args.query, compResponse.listings, 20),
+        searched_at: compResponse.searched_at,
+        source_errors: compResponse.source_errors,
+      };
+      const expectedSalePrice = resaleComps.recommended_resale_price;
+      if (expectedSalePrice === null) {
+        return toolText({
+          query: args.query,
+          error: "Could not estimate resale value from eBay comps.",
+          resale_comps: resaleComps,
+          opportunities: [],
+        });
+      }
+      const buySources = args.buy_sources?.length ? args.buy_sources : ["facebook_marketplace", "craigslist", "offerup", "ebay"];
+      const buyResponse = await searchProducts(env, {
+        query: args.query,
+        sources: buySources,
+        maxResultsPerSource: args.max_results_per_source,
+        priceMax: args.price_max,
+        condition: args.condition ?? "any",
+        location: args.location,
+      });
+      const minProfit = args.min_profit ?? 25;
+      const minRoiPercent = args.min_roi_percent ?? 20;
+      const opportunities = buyResponse.listings
+        .map((listing) => {
+          const purchasePrice = effectivePrice(listing);
+          if (purchasePrice === null) return null;
+          const profit = calculateResaleProfit(env, {
+            purchase_price: purchasePrice,
+            expected_sale_price: expectedSalePrice,
+            inbound_shipping: listing.shipping_cost ?? 0,
+            outbound_shipping: args.outbound_shipping ?? 0,
+            purchase_tax_rate_percent: args.purchase_tax_rate_percent,
+            platform_fee_percent: args.platform_fee_percent,
+            promoted_listing_percent: args.promoted_listing_percent,
+            packing_cost: args.packing_cost,
+          });
+          const opportunity = scoreOpportunity(args.query, listing, profit, {
+            compCount: resaleComps.comp_count,
+            minProfit,
+            minRoiPercent,
+          });
+          return profit.net_profit >= minProfit && profit.roi_percent >= minRoiPercent ? opportunity : null;
+        })
+        .filter((value): value is ReturnType<typeof scoreOpportunity> => value !== null)
+        .sort((a, b) => b.opportunity_score - a.opportunity_score || b.net_profit - a.net_profit || a.risk_score - b.risk_score)
+        .slice(0, args.max_results ?? 10);
+      return toolText({
+        query: args.query,
+        searched_at: buyResponse.searched_at,
+        buy_sources: buySources,
+        sell_side: "ebay",
+        source_errors: buyResponse.source_errors,
+        resale_comps: resaleComps,
+        filters: {
+          min_profit: minProfit,
+          min_roi_percent: minRoiPercent,
+          price_max: args.price_max ?? null,
+        },
+        opportunities,
+      });
+    },
+  );
+
+  server.tool(
+    "draft_ebay_listing",
+    "Draft an eBay title, description, pricing hint, and photo/disclosure checklist.",
+    {
+      product_title: z.string().min(1),
+      condition: z.string().optional(),
+      known_defects: z.string().optional(),
+      included_accessories: z.string().optional(),
+      comp_summary: z.record(z.string(), z.unknown()).optional(),
+    },
+    async (args) => toolText(draftEbayListing(args)),
+  );
+
+  server.tool(
+    "save_resale_lead",
+    "Save an arbitrage lead into the reseller pipeline. Requires RESALE_KV on the Worker.",
+    { lead: z.record(z.string(), z.unknown()) },
+    async ({ lead }) => toolText(await saveResaleLead(env, lead)),
+  );
+
+  server.tool(
+    "update_resale_lead_status",
+    "Move a reseller lead through watching/contacted/offer/purchased/listed/sold/rejected.",
+    {
+      lead_id: z.string().min(1),
+      status: z.string().min(1),
+      notes: z.string().optional(),
+    },
+    async (args) => toolText(await updateResaleLeadStatus(env, args.lead_id, args.status, args.notes)),
+  );
+
+  server.tool(
+    "create_inventory_item",
+    "Create a purchased inventory item for resale tracking. Requires RESALE_KV on the Worker.",
+    { item: z.record(z.string(), z.unknown()) },
+    async ({ item }) => toolText(await createInventoryItem(env, item)),
+  );
+
+  server.tool(
+    "mark_inventory_listed",
+    "Mark an inventory item as listed for sale.",
+    {
+      inventory_id: z.string().min(1),
+      listing_url: z.string().min(1),
+      asking_price: z.number().nonnegative(),
+    },
+    async (args) => toolText(await markInventoryListed(env, args.inventory_id, args.listing_url, args.asking_price)),
+  );
+
+  server.tool(
+    "mark_inventory_sold",
+    "Mark inventory sold and calculate realized profit.",
+    {
+      inventory_id: z.string().min(1),
+      sale_price: z.number().nonnegative(),
+      sold_url: z.string().optional(),
+      outbound_shipping: z.number().nonnegative().optional(),
+      platform_fee_percent: z.number().nonnegative().optional(),
+    },
+    async (args) => toolText(await markInventorySold(env, args)),
+  );
+
+  server.tool(
+    "calculate_business_metrics",
+    "Summarize leads, inventory, revenue, realized profit, and ROI.",
+    {},
+    async () => toolText(await calculateBusinessMetrics(env)),
+  );
+
   return server;
 }
 
@@ -283,6 +496,7 @@ export default {
         name: "shopping-deals-mcp",
         mcp: `${url.origin}/mcp`,
         sources: listSources(env),
+        resale_persistence: Boolean(env.RESALE_KV),
       });
     }
 
@@ -950,6 +1164,343 @@ function comparePrices(listings: Listing[]) {
   }).sort((a, b) => priceSortValue(a.low_price) - priceSortValue(b.low_price) || b.count - a.count);
 }
 
+function buildResaleComps(query: string, listings: Listing[], maxComps: number) {
+  const eligible = listings
+    .filter((listing) =>
+      effectivePrice(listing) !== null &&
+      !isAccessoryMismatch(query, listing.title) &&
+      !isModelTokenMismatch(query, listing.title) &&
+      titleSimilarity(query, listing.title) >= 0.35,
+    )
+    .sort((a, b) => priceSort(a) - priceSort(b) || a.title.localeCompare(b.title));
+  const prices = eligible.map((listing) => effectivePrice(listing)).filter((price): price is number => price !== null);
+  return {
+    query,
+    basis: "active_ebay_listing_proxy",
+    limitation: "Current implementation uses active eBay listings as resale comps. True sold-comps support requires a completed/sold-listing data source.",
+    comp_count: prices.length,
+    low_price: prices.length ? Math.min(...prices) : null,
+    median_price: prices.length ? medianNumber(prices) : null,
+    high_price: prices.length ? Math.max(...prices) : null,
+    average_price: prices.length ? roundMoney(prices.reduce((a, b) => a + b, 0) / prices.length) : null,
+    recommended_resale_price: recommendedResalePrice(prices),
+    sell_through_confidence: sellThroughConfidence(prices.length, prices),
+    comps: eligible.slice(0, maxComps),
+  };
+}
+
+function calculateResaleProfit(
+  env: Env,
+  args: {
+    purchase_price: number;
+    expected_sale_price: number;
+    inbound_shipping?: number;
+    outbound_shipping?: number;
+    purchase_tax_rate_percent?: number;
+    platform_fee_percent?: number;
+    promoted_listing_percent?: number;
+    payment_fixed_fee?: number;
+    packing_cost?: number;
+    misc_cost?: number;
+    buyer_shipping_charged?: number;
+  },
+) {
+  const inboundShipping = args.inbound_shipping ?? 0;
+  const outboundShipping = args.outbound_shipping ?? 0;
+  const taxRate = args.purchase_tax_rate_percent ?? resolvedTaxRate(env, undefined) ?? 0;
+  const platformFeePercent = args.platform_fee_percent ?? DEFAULT_EBAY_FINAL_VALUE_FEE_PERCENT;
+  const promotedListingPercent = args.promoted_listing_percent ?? 0;
+  const paymentFixedFee = args.payment_fixed_fee ?? DEFAULT_PAYMENT_FIXED_FEE;
+  const packingCost = args.packing_cost ?? DEFAULT_PACKING_COST;
+  const miscCost = args.misc_cost ?? 0;
+  const buyerShippingCharged = args.buyer_shipping_charged ?? 0;
+  const purchaseTax = roundMoney((args.purchase_price + inboundShipping) * (taxRate / 100));
+  const grossRevenue = args.expected_sale_price + buyerShippingCharged;
+  const feeBasis = args.expected_sale_price + buyerShippingCharged;
+  const platformFee = roundMoney(feeBasis * (platformFeePercent / 100));
+  const promotedFee = roundMoney(feeBasis * (promotedListingPercent / 100));
+  const totalCost = roundMoney(
+    args.purchase_price +
+      inboundShipping +
+      purchaseTax +
+      outboundShipping +
+      packingCost +
+      miscCost +
+      platformFee +
+      promotedFee +
+      paymentFixedFee,
+  );
+  const netProfit = roundMoney(grossRevenue - totalCost);
+  const cashInvested = roundMoney(args.purchase_price + inboundShipping + purchaseTax + packingCost + miscCost);
+  const roiPercent = cashInvested ? roundMoney((netProfit / cashInvested) * 100) : 0;
+  const feeRate = (platformFeePercent + promotedListingPercent) / 100;
+  const fixedCostsBeforeSale = args.purchase_price + inboundShipping + purchaseTax + outboundShipping + packingCost + miscCost + paymentFixedFee;
+  const breakEvenSalePrice = roundMoney(Math.ceil((fixedCostsBeforeSale / Math.max(1 - feeRate, 0.01)) * 100) / 100);
+  return {
+    purchase_price: roundMoney(args.purchase_price),
+    expected_sale_price: roundMoney(args.expected_sale_price),
+    gross_revenue: roundMoney(grossRevenue),
+    purchase_tax: purchaseTax,
+    platform_fee: platformFee,
+    promoted_listing_fee: promotedFee,
+    payment_fixed_fee: roundMoney(paymentFixedFee),
+    packing_cost: roundMoney(packingCost),
+    total_cost: totalCost,
+    net_profit: netProfit,
+    roi_percent: roiPercent,
+    break_even_sale_price: breakEvenSalePrice,
+    max_buy_price_for_20_roi: maxBuyPriceForTarget({
+      expectedSalePrice: args.expected_sale_price,
+      targetRoiPercent: 20,
+      inboundShipping,
+      outboundShipping,
+      purchaseTaxRatePercent: taxRate,
+      platformFeePercent,
+      promotedListingPercent,
+      paymentFixedFee,
+      packingCost,
+      miscCost,
+      buyerShippingCharged,
+    }),
+  };
+}
+
+function maxBuyPriceForTarget(args: {
+  expectedSalePrice: number;
+  targetRoiPercent: number;
+  inboundShipping: number;
+  outboundShipping: number;
+  purchaseTaxRatePercent: number;
+  platformFeePercent: number;
+  promotedListingPercent: number;
+  paymentFixedFee: number;
+  packingCost: number;
+  miscCost: number;
+  buyerShippingCharged: number;
+}): number {
+  const taxRate = args.purchaseTaxRatePercent / 100;
+  const targetRoi = args.targetRoiPercent / 100;
+  const feeRate = (args.platformFeePercent + args.promotedListingPercent) / 100;
+  const revenue = args.expectedSalePrice + args.buyerShippingCharged;
+  const saleFees = (args.expectedSalePrice + args.buyerShippingCharged) * feeRate + args.paymentFixedFee;
+  const fixedCosts = args.inboundShipping * (1 + taxRate) + args.outboundShipping + args.packingCost + args.miscCost + saleFees;
+  return roundMoney(Math.max((revenue - fixedCosts) / (1 + taxRate + targetRoi), 0));
+}
+
+function scoreOpportunity(
+  query: string,
+  listing: Listing,
+  profit: ReturnType<typeof calculateResaleProfit>,
+  options: { compCount: number; minProfit: number; minRoiPercent: number },
+) {
+  const warnings: string[] = [];
+  const relevance = titleSimilarity(query, listing.title);
+  if (isAccessoryMismatch(query, listing.title)) warnings.push("Looks like an accessory or part; reject unless that is intentional.");
+  if (isModelTokenMismatch(query, listing.title)) warnings.push("Model token mismatch; verify exact variant before buying.");
+  if (["craigslist", "facebook_marketplace", "offerup"].includes(listing.source)) {
+    warnings.push("Local marketplace risk; verify seller identity, condition, and serial/authenticity.");
+  }
+  if (options.compCount < 4) warnings.push("Thin comp set; resale estimate is weak.");
+  if (profit.net_profit < options.minProfit) warnings.push("Below requested minimum net profit.");
+  if (profit.roi_percent < options.minRoiPercent) warnings.push("Below requested minimum ROI.");
+
+  let riskScore = 25;
+  if (["craigslist", "facebook_marketplace", "offerup"].includes(listing.source)) riskScore += 25;
+  if (["unknown", "used"].includes(listing.condition)) riskScore += 10;
+  if (relevance < 0.5) riskScore += 20;
+  if (options.compCount < 4) riskScore += 15;
+  riskScore = Math.min(riskScore, 100);
+  const opportunityScore = (
+    Math.min(Math.max(profit.roi_percent, 0), 100) * 0.45 +
+    (Math.min(Math.max(profit.net_profit, 0), 250) / 250) * 35 +
+    Math.max(0, 20 - riskScore * 0.2)
+  );
+  return {
+    listing,
+    net_profit: profit.net_profit,
+    roi_percent: profit.roi_percent,
+    max_buy_price_for_20_roi: profit.max_buy_price_for_20_roi,
+    opportunity_score: roundMoney(opportunityScore),
+    risk_score: riskScore,
+    warnings,
+  };
+}
+
+function draftEbayListing(args: {
+  product_title: string;
+  condition?: string;
+  known_defects?: string;
+  included_accessories?: string;
+  comp_summary?: Record<string, unknown>;
+}) {
+  const condition = args.condition ?? "used";
+  const suggestedPrice = args.comp_summary?.recommended_resale_price ?? args.comp_summary?.median_price ?? null;
+  const bullets = [
+    `Condition: ${condition.replace(/_/g, " ")}.`,
+    "Tested and working unless otherwise noted.",
+  ];
+  if (args.included_accessories) bullets.push(`Includes: ${args.included_accessories}.`);
+  if (args.known_defects) bullets.push(`Disclosure: ${args.known_defects}.`);
+  else bullets.push("No known defects observed during inspection.");
+  return {
+    title: ebayListingTitle(args.product_title),
+    suggested_price: typeof suggestedPrice === "number" ? suggestedPrice : null,
+    format: "buy_it_now",
+    condition,
+    description: bullets.join("\n"),
+    photo_checklist: [
+      "Front, back, top, bottom, and ports",
+      "Serial/model label if safe to show",
+      "Screen/lens closeups",
+      "Included accessories",
+      "Any scratches, dents, missing parts, or defects",
+    ],
+    shipping_recommendation: "Use calculated shipping for heavy items; use buyer-paid or padded flat-rate only when dimensions are known.",
+    disclosure_checklist: [
+      "Confirm exact model number",
+      "Confirm activation/account locks are removed where relevant",
+      "Confirm battery health or runtime when relevant",
+      "List missing accessories explicitly",
+    ],
+  };
+}
+
+async function saveResaleLead(env: Env, payload: Record<string, unknown>) {
+  const data = await readResaleData(env);
+  if ("error" in data) return data;
+  const now = new Date().toISOString();
+  const lead = {
+    id: typeof payload.id === "string" ? payload.id : `lead_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+    status: validLeadStatus(typeof payload.status === "string" ? payload.status : "watching"),
+    created_at: now,
+    updated_at: now,
+    ...payload,
+  };
+  data.leads[String(lead.id)] = lead;
+  await writeResaleData(env, data);
+  return lead;
+}
+
+async function updateResaleLeadStatus(env: Env, leadId: string, status: string, notes?: string) {
+  const data = await readResaleData(env);
+  if ("error" in data) return data;
+  const lead = data.leads[leadId];
+  if (!lead) return { error: `Unknown lead: ${leadId}` };
+  lead.status = validLeadStatus(status);
+  lead.updated_at = new Date().toISOString();
+  if (notes) {
+    const existingNotes = Array.isArray(lead.notes) ? lead.notes : [];
+    lead.notes = [...existingNotes, { at: new Date().toISOString(), text: notes }];
+  }
+  await writeResaleData(env, data);
+  return lead;
+}
+
+async function createInventoryItem(env: Env, payload: Record<string, unknown>) {
+  const data = await readResaleData(env);
+  if ("error" in data) return data;
+  const now = new Date().toISOString();
+  const item = {
+    id: typeof payload.id === "string" ? payload.id : `inv_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+    status: typeof payload.status === "string" ? payload.status : "purchased",
+    created_at: now,
+    updated_at: now,
+    ...payload,
+  };
+  data.inventory[String(item.id)] = item;
+  await writeResaleData(env, data);
+  return item;
+}
+
+async function markInventoryListed(env: Env, inventoryId: string, listingUrl: string, askingPrice: number) {
+  const data = await readResaleData(env);
+  if ("error" in data) return data;
+  const item = data.inventory[inventoryId];
+  if (!item) return { error: `Unknown inventory item: ${inventoryId}` };
+  Object.assign(item, {
+    status: "listed",
+    listing_url: listingUrl,
+    asking_price: askingPrice,
+    listed_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+  await writeResaleData(env, data);
+  return item;
+}
+
+async function markInventorySold(
+  env: Env,
+  args: {
+    inventory_id: string;
+    sale_price: number;
+    sold_url?: string;
+    outbound_shipping?: number;
+    platform_fee_percent?: number;
+  },
+) {
+  const data = await readResaleData(env);
+  if ("error" in data) return data;
+  const item = data.inventory[args.inventory_id];
+  if (!item) return { error: `Unknown inventory item: ${args.inventory_id}` };
+  const profit = calculateResaleProfit(env, {
+    purchase_price: numberValue(item.purchase_price),
+    expected_sale_price: args.sale_price,
+    inbound_shipping: numberValue(item.inbound_shipping),
+    outbound_shipping: args.outbound_shipping ?? 0,
+    purchase_tax_rate_percent: numberValue(item.purchase_tax_rate_percent),
+    platform_fee_percent: args.platform_fee_percent,
+  });
+  Object.assign(item, {
+    status: "sold",
+    sale_price: args.sale_price,
+    sold_url: args.sold_url ?? null,
+    sold_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    profit,
+  });
+  await writeResaleData(env, data);
+  return item;
+}
+
+async function calculateBusinessMetrics(env: Env) {
+  const data = await readResaleData(env);
+  if ("error" in data) return data;
+  const inventory = Object.values(data.inventory);
+  const sold = inventory.filter((item) => item.status === "sold");
+  const active = inventory.filter((item) => item.status !== "sold");
+  const soldRevenue = sold.reduce((sum, item) => sum + numberValue(item.sale_price), 0);
+  const realizedProfit = sold.reduce((sum, item) => sum + numberValue(objectValue(item.profit)?.net_profit), 0);
+  const roiValues = sold.map((item) => numberValue(objectValue(item.profit)?.roi_percent)).filter((value) => value !== 0);
+  return {
+    lead_count: Object.keys(data.leads).length,
+    inventory_count: inventory.length,
+    active_inventory_count: active.length,
+    sold_count: sold.length,
+    cash_invested_active: roundMoney(active.reduce((sum, item) => sum + numberValue(item.purchase_price), 0)),
+    sold_revenue: roundMoney(soldRevenue),
+    realized_net_profit: roundMoney(realizedProfit),
+    average_realized_roi_percent: roiValues.length ? roundMoney(roiValues.reduce((a, b) => a + b, 0) / roiValues.length) : 0,
+    leads_by_status: countByStatus(Object.values(data.leads)),
+    inventory_by_status: countByStatus(inventory),
+  };
+}
+
+async function readResaleData(env: Env): Promise<ResaleData | { error: string; requires: string[] }> {
+  if (!env.RESALE_KV) {
+    return {
+      error: "Resale persistence is not configured for this Worker.",
+      requires: ["Bind a Cloudflare KV namespace as RESALE_KV"],
+    };
+  }
+  const stored = await env.RESALE_KV.get("resale-business", "json") as ResaleData | null;
+  return stored ?? { leads: {}, inventory: {} };
+}
+
+async function writeResaleData(env: Env, data: ResaleData): Promise<void> {
+  if (!env.RESALE_KV) throw new Error("RESALE_KV is not configured.");
+  await env.RESALE_KV.put("resale-business", JSON.stringify(data));
+}
+
 function dedupeListings(listings: Listing[]): Listing[] {
   const seenUrls = new Set<string>();
   const byTitle = new Map<string, Listing>();
@@ -1033,6 +1584,68 @@ function normalizeText(text: string): string {
 function productKey(title: string): string {
   const stop = new Set(["the", "a", "an", "for", "with", "and", "or", "new", "used", "open", "box"]);
   return normalizeText(title).split(/\s+/).filter((token) => token.length > 1 && !stop.has(token)).slice(0, 8).join(" ");
+}
+
+function medianNumber(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const midpoint = Math.floor(sorted.length / 2);
+  if (sorted.length % 2) return roundMoney(sorted[midpoint] ?? 0);
+  return roundMoney(((sorted[midpoint - 1] ?? 0) + (sorted[midpoint] ?? 0)) / 2);
+}
+
+function recommendedResalePrice(prices: number[]): number | null {
+  if (!prices.length) return null;
+  const sorted = [...prices].sort((a, b) => a - b);
+  const trimmed = sorted.length >= 4 ? sorted.slice(1, -1) : sorted;
+  return medianNumber(trimmed);
+}
+
+function sellThroughConfidence(compCount: number, prices: number[]): string {
+  if (compCount >= 15 && coefficientOfVariation(prices) < 0.35) return "medium";
+  if (compCount >= 6) return "low_medium";
+  if (compCount > 0) return "low";
+  return "unknown";
+}
+
+function coefficientOfVariation(prices: number[]): number {
+  if (prices.length < 2) return 1;
+  const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+  if (!avg) return 1;
+  const variance = prices.reduce((sum, price) => sum + (price - avg) ** 2, 0) / prices.length;
+  return Math.sqrt(variance) / avg;
+}
+
+function ebayListingTitle(title: string): string {
+  const words = title.replace(/\s+/g, " ").trim().split(/\s+/);
+  const output: string[] = [];
+  let length = 0;
+  for (const word of words) {
+    const nextLength = length + word.length + (output.length ? 1 : 0);
+    if (nextLength > 80) break;
+    output.push(word);
+    length = nextLength;
+  }
+  return output.join(" ");
+}
+
+function validLeadStatus(status: string): string {
+  if (!LEAD_STATUSES.has(status)) {
+    throw new Error(`Status must be one of: ${[...LEAD_STATUSES].sort().join(", ")}`);
+  }
+  return status;
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function countByStatus(items: Record<string, unknown>[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of items) {
+    const status = typeof item.status === "string" ? item.status : "unknown";
+    counts[status] = (counts[status] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function parsePrice(value: unknown): number | null {

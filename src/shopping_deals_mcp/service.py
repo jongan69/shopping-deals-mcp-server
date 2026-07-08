@@ -16,12 +16,23 @@ from shopping_deals_mcp.pricing import (
     score_deals,
     title_similarity,
 )
+from shopping_deals_mcp.resale import (
+    DEFAULT_EBAY_FINAL_VALUE_FEE_PERCENT,
+    DEFAULT_PACKING_COST,
+    ProfitInputs,
+    ResaleStore,
+    build_resale_comps,
+    calculate_resale_profit,
+    draft_ebay_listing,
+    score_opportunity,
+)
 from shopping_deals_mcp.sources import build_sources
 
 
 class ShoppingDealsService:
     def __init__(self):
         self.sources = build_sources()
+        self.resale_store = ResaleStore()
 
     def source_statuses(self) -> list[SourceStatus]:
         return [source.status() for source in self.sources.values()]
@@ -237,6 +248,202 @@ class ShoppingDealsService:
         if listing is None:
             return {"error": "Listing details are unavailable for this source or listing."}
         return listing.model_dump()
+
+    async def get_ebay_sold_comps(
+        self,
+        query: str,
+        *,
+        max_results: int = 20,
+        condition: str = "any",
+    ) -> dict:
+        response = await self.search_products(
+            query,
+            sources=["ebay"],
+            max_results_per_source=max(max_results, 25),
+            condition=condition,
+        )
+        comps = build_resale_comps(query, response.listings, max_comps=max_results)
+        comps.update(
+            {
+                "searched_at": response.searched_at,
+                "source_errors": response.source_errors,
+            }
+        )
+        return comps
+
+    def calculate_resale_profit(
+        self,
+        *,
+        purchase_price: float,
+        expected_sale_price: float,
+        inbound_shipping: float = 0.0,
+        outbound_shipping: float = 0.0,
+        purchase_tax_rate_percent: float | None = None,
+        platform_fee_percent: float = DEFAULT_EBAY_FINAL_VALUE_FEE_PERCENT,
+        promoted_listing_percent: float = 0.0,
+        payment_fixed_fee: float = 0.40,
+        packing_cost: float = DEFAULT_PACKING_COST,
+        misc_cost: float = 0.0,
+        buyer_shipping_charged: float = 0.0,
+    ) -> dict:
+        tax_rate = purchase_tax_rate_percent
+        if tax_rate is None:
+            tax_rate = settings.estimated_tax_rate_percent or 0.0
+        return calculate_resale_profit(
+            ProfitInputs(
+                purchase_price=purchase_price,
+                expected_sale_price=expected_sale_price,
+                inbound_shipping=inbound_shipping,
+                outbound_shipping=outbound_shipping,
+                purchase_tax_rate_percent=tax_rate,
+                platform_fee_percent=platform_fee_percent,
+                promoted_listing_percent=promoted_listing_percent,
+                payment_fixed_fee=payment_fixed_fee,
+                packing_cost=packing_cost,
+                misc_cost=misc_cost,
+                buyer_shipping_charged=buyer_shipping_charged,
+            )
+        )
+
+    async def find_arbitrage_opportunities(
+        self,
+        query: str,
+        *,
+        buy_sources: list[str] | None = None,
+        max_results: int = 10,
+        max_results_per_source: int | None = None,
+        location: str | None = None,
+        condition: str = "any",
+        price_max: float | None = None,
+        min_profit: float = 25.0,
+        min_roi_percent: float = 20.0,
+        purchase_tax_rate_percent: float | None = None,
+        outbound_shipping: float = 0.0,
+        platform_fee_percent: float = DEFAULT_EBAY_FINAL_VALUE_FEE_PERCENT,
+        promoted_listing_percent: float = 0.0,
+        packing_cost: float = DEFAULT_PACKING_COST,
+    ) -> dict:
+        comps = await self.get_ebay_sold_comps(query, max_results=30, condition=condition)
+        expected_sale_price = comps.get("recommended_resale_price")
+        if expected_sale_price is None:
+            return {
+                "query": query,
+                "error": "Could not estimate resale value from eBay comps.",
+                "comps": comps,
+                "opportunities": [],
+            }
+
+        sources = buy_sources or ["facebook_marketplace", "craigslist", "offerup", "ebay"]
+        buy_response = await self.search_products(
+            query,
+            sources=sources,
+            max_results_per_source=max_results_per_source,
+            price_max=price_max,
+            condition=condition,
+            location=location,
+        )
+        tax_rate = purchase_tax_rate_percent
+        if tax_rate is None:
+            tax_rate = settings.estimated_tax_rate_percent or 0.0
+        opportunities = []
+        for listing in buy_response.listings:
+            purchase_price = effective_price(listing)
+            if purchase_price is None:
+                continue
+            inbound_shipping = listing.shipping_cost or 0.0
+            profit = calculate_resale_profit(
+                ProfitInputs(
+                    purchase_price=purchase_price,
+                    expected_sale_price=float(expected_sale_price),
+                    inbound_shipping=inbound_shipping,
+                    outbound_shipping=outbound_shipping,
+                    purchase_tax_rate_percent=tax_rate,
+                    platform_fee_percent=platform_fee_percent,
+                    promoted_listing_percent=promoted_listing_percent,
+                    packing_cost=packing_cost,
+                )
+            )
+            opportunity = score_opportunity(
+                query,
+                listing,
+                profit,
+                comp_count=int(comps.get("comp_count") or 0),
+                min_profit=min_profit,
+                min_roi_percent=min_roi_percent,
+            )
+            if profit["net_profit"] >= min_profit and profit["roi_percent"] >= min_roi_percent:
+                opportunities.append(opportunity)
+
+        opportunities.sort(
+            key=lambda item: (
+                -item["opportunity_score"],
+                -item["net_profit"],
+                item["risk_score"],
+            )
+        )
+        return {
+            "query": query,
+            "searched_at": buy_response.searched_at,
+            "buy_sources": sources,
+            "sell_side": "ebay",
+            "source_errors": buy_response.source_errors,
+            "resale_comps": comps,
+            "filters": {
+                "min_profit": min_profit,
+                "min_roi_percent": min_roi_percent,
+                "price_max": price_max,
+            },
+            "opportunities": opportunities[:max_results],
+        }
+
+    def draft_ebay_listing(
+        self,
+        *,
+        product_title: str,
+        condition: str = "used",
+        known_defects: str | None = None,
+        included_accessories: str | None = None,
+        comp_summary: dict | None = None,
+    ) -> dict:
+        return draft_ebay_listing(
+            product_title=product_title,
+            condition=condition,
+            known_defects=known_defects,
+            included_accessories=included_accessories,
+            comp_summary=comp_summary,
+        )
+
+    def save_resale_lead(self, payload: dict) -> dict:
+        return self.resale_store.save_lead(payload)
+
+    def update_resale_lead_status(self, lead_id: str, status: str, notes: str | None = None) -> dict:
+        return self.resale_store.update_lead_status(lead_id, status, notes)
+
+    def create_inventory_item(self, payload: dict) -> dict:
+        return self.resale_store.create_inventory_item(payload)
+
+    def mark_inventory_listed(self, inventory_id: str, listing_url: str, asking_price: float) -> dict:
+        return self.resale_store.mark_listed(inventory_id, listing_url, asking_price)
+
+    def mark_inventory_sold(
+        self,
+        inventory_id: str,
+        sale_price: float,
+        *,
+        sold_url: str | None = None,
+        outbound_shipping: float = 0.0,
+        platform_fee_percent: float = DEFAULT_EBAY_FINAL_VALUE_FEE_PERCENT,
+    ) -> dict:
+        return self.resale_store.mark_sold(
+            inventory_id,
+            sale_price,
+            sold_url=sold_url,
+            outbound_shipping=outbound_shipping,
+            platform_fee_percent=platform_fee_percent,
+        )
+
+    def calculate_business_metrics(self) -> dict:
+        return self.resale_store.metrics()
 
 
 def resolved_tax_rate(tax_rate_percent: float | None) -> float | None:

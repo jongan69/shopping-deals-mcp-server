@@ -7,6 +7,12 @@
   "observability": {
     "enabled": true
   },
+  "kv_namespaces": [
+    {
+      "binding": "RESALE_KV",
+      "id": "d9c5da97d0b1479c94a700f823251c13"
+    }
+  ],
   "vars": {
     "EBAY_MARKETPLACE_ID": "EBAY_US",
     "EBAY_USE_SANDBOX": "false",
