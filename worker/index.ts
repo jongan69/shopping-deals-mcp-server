@@ -18,6 +18,12 @@ type Env = {
   SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE?: string;
   SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE?: string;
   SHOPPING_FACEBOOK_MARKETPLACE_RADIUS_KM?: string;
+  SHOPPING_OFFERUP_DEFAULT_CITY?: string;
+  SHOPPING_OFFERUP_DEFAULT_STATE?: string;
+  SHOPPING_OFFERUP_DEFAULT_ZIP?: string;
+  SHOPPING_OFFERUP_DEFAULT_LATITUDE?: string;
+  SHOPPING_OFFERUP_DEFAULT_LONGITUDE?: string;
+  SHOPPING_OFFERUP_RADIUS_MILES?: string;
   RESALE_KV?: KVNamespace;
 };
 
@@ -283,6 +289,59 @@ function createServer(env: Env) {
         searched_at: response.searched_at,
         source_errors: response.source_errors,
         comparisons: comparePrices(response.listings),
+      });
+    },
+  );
+
+  server.tool(
+    "compare_area_prices",
+    "Search the same product across multiple areas and compare local price ranges.",
+    {
+      query: z.string().min(1),
+      areas: z.array(z.string()).optional(),
+      sources: z.array(z.string()).optional(),
+      max_results_per_area: z.number().int().positive().optional(),
+      price_min: z.number().optional(),
+      price_max: z.number().optional(),
+      condition: z.string().optional(),
+    },
+    async (args) => {
+      const areas = args.areas?.length ? args.areas : ["Miami Beach, FL", "Miami, FL", "Fort Lauderdale, FL", "New York, NY", "Los Angeles, CA"];
+      const sources = args.sources?.length ? args.sources : ["offerup", "facebook_marketplace", "craigslist"];
+      const areaResults = [];
+      for (const area of areas) {
+        const response = await searchProducts(env, {
+          query: args.query,
+          sources,
+          maxResultsPerSource: args.max_results_per_area,
+          priceMin: args.price_min,
+          priceMax: args.price_max,
+          condition: args.condition ?? "any",
+          location: area,
+        });
+        const prices = response.listings.map((listing) => effectivePrice(listing)).filter((price): price is number => price !== null);
+        areaResults.push({
+          area,
+          searched_at: response.searched_at,
+          source_errors: response.source_errors,
+          total_results: response.total_results,
+          priced_results: prices.length,
+          low_price: prices.length ? Math.min(...prices) : null,
+          median_price: prices.length ? medianNumber(prices) : null,
+          high_price: prices.length ? Math.max(...prices) : null,
+          average_price: prices.length ? roundMoney(prices.reduce((a, b) => a + b, 0) / prices.length) : null,
+          sources_used: response.sources_used,
+          listings: response.listings,
+        });
+      }
+      areaResults.sort((a, b) =>
+        priceSortValue(a.median_price) - priceSortValue(b.median_price) || a.area.localeCompare(b.area),
+      );
+      return toolText({
+        query: args.query,
+        areas,
+        sources,
+        area_results: areaResults,
       });
     },
   );
@@ -772,7 +831,7 @@ function listSources(env: Env) {
       display_name: "OfferUp",
       available: true,
       requires: [],
-      notes: "Public OfferUp search parser. Results are local and may vary by inferred location.",
+      notes: "Public OfferUp search parser. Defaults to Miami Beach and supports location overrides through OfferUp's location cookie.",
     },
     {
       name: "amazon",
@@ -824,7 +883,7 @@ async function searchProducts(
         return { source, listings: await craigslistSearch(env, options.query, limit, options.priceMin, options.priceMax) };
       }
       if (source === "offerup") {
-        return { source, listings: await offerupSearch(env, options.query, limit, options.priceMin, options.priceMax) };
+        return { source, listings: await offerupSearch(env, options.query, limit, options.priceMin, options.priceMax, options.location) };
       }
       if (source === "amazon") {
         if (!boolEnv(env.SHOPPING_ENABLE_AMAZON_SCRAPE, false)) {
@@ -1130,9 +1189,23 @@ function parseFacebookMarketplace(data: Record<string, unknown>, limit: number, 
   return listings;
 }
 
-async function offerupSearch(env: Env, query: string, limit: number, priceMin?: number, priceMax?: number): Promise<Listing[]> {
-  const response = await timedFetch(env, `https://offerup.com/search?q=${encodeURIComponent(query)}`, {
-    headers: browserHeaders("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+async function offerupSearch(
+  env: Env,
+  query: string,
+  limit: number,
+  priceMin?: number,
+  priceMax?: number,
+  location?: string,
+): Promise<Listing[]> {
+  const params = new URLSearchParams({
+    q: query,
+    radius: String(intEnv(env.SHOPPING_OFFERUP_RADIUS_MILES, 30)),
+  });
+  const response = await timedFetch(env, `https://offerup.com/search?${params}`, {
+    headers: {
+      ...browserHeaders("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+      Cookie: `ou.location=${encodeURIComponent(JSON.stringify(offerupLocation(env, location)))}`,
+    },
   });
   if (!response.ok) throw new Error(`OfferUp search failed: HTTP ${response.status}`);
   const html = await response.text();
@@ -2341,6 +2414,57 @@ function facebookCoordinates(env: Env, location?: string): { latitude: number; l
   return null;
 }
 
+function offerupLocation(env: Env, location?: string) {
+  const resolved = location ? offerupLocationFromText(location) : null;
+  if (resolved) return resolved;
+  return {
+    city: env.SHOPPING_OFFERUP_DEFAULT_CITY ?? "Miami Beach",
+    state: env.SHOPPING_OFFERUP_DEFAULT_STATE ?? "FL",
+    zipCode: env.SHOPPING_OFFERUP_DEFAULT_ZIP ?? "33139",
+    longitude: numberEnv(env.SHOPPING_OFFERUP_DEFAULT_LONGITUDE, -80.1300),
+    latitude: numberEnv(env.SHOPPING_OFFERUP_DEFAULT_LATITUDE, 25.7907),
+    source: "default",
+  };
+}
+
+function offerupLocationFromText(location: string) {
+  const normalized = location.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const aliases: Record<string, { city: string; state: string; zipCode: string; latitude: number; longitude: number; source: string }> = {
+    "miami beach": { city: "Miami Beach", state: "FL", zipCode: "33139", latitude: 25.7907, longitude: -80.1300, source: "user" },
+    "miami beach fl": { city: "Miami Beach", state: "FL", zipCode: "33139", latitude: 25.7907, longitude: -80.1300, source: "user" },
+    miami: { city: "Miami", state: "FL", zipCode: "33131", latitude: 25.7617, longitude: -80.1918, source: "user" },
+    "miami fl": { city: "Miami", state: "FL", zipCode: "33131", latitude: 25.7617, longitude: -80.1918, source: "user" },
+    "fort lauderdale": { city: "Fort Lauderdale", state: "FL", zipCode: "33301", latitude: 26.1224, longitude: -80.1373, source: "user" },
+    "fort lauderdale fl": { city: "Fort Lauderdale", state: "FL", zipCode: "33301", latitude: 26.1224, longitude: -80.1373, source: "user" },
+    orlando: { city: "Orlando", state: "FL", zipCode: "32801", latitude: 28.5383, longitude: -81.3792, source: "user" },
+    "orlando fl": { city: "Orlando", state: "FL", zipCode: "32801", latitude: 28.5383, longitude: -81.3792, source: "user" },
+    tampa: { city: "Tampa", state: "FL", zipCode: "33602", latitude: 27.9506, longitude: -82.4572, source: "user" },
+    "tampa fl": { city: "Tampa", state: "FL", zipCode: "33602", latitude: 27.9506, longitude: -82.4572, source: "user" },
+    "new york": { city: "New York", state: "NY", zipCode: "10001", latitude: 40.7128, longitude: -74.0060, source: "user" },
+    "new york ny": { city: "New York", state: "NY", zipCode: "10001", latitude: 40.7128, longitude: -74.0060, source: "user" },
+    nyc: { city: "New York", state: "NY", zipCode: "10001", latitude: 40.7128, longitude: -74.0060, source: "user" },
+    "los angeles": { city: "Los Angeles", state: "CA", zipCode: "90012", latitude: 34.0522, longitude: -118.2437, source: "user" },
+    "los angeles ca": { city: "Los Angeles", state: "CA", zipCode: "90012", latitude: 34.0522, longitude: -118.2437, source: "user" },
+    atlanta: { city: "Atlanta", state: "GA", zipCode: "30303", latitude: 33.7490, longitude: -84.3880, source: "user" },
+    "atlanta ga": { city: "Atlanta", state: "GA", zipCode: "30303", latitude: 33.7490, longitude: -84.3880, source: "user" },
+    chicago: { city: "Chicago", state: "IL", zipCode: "60601", latitude: 41.8781, longitude: -87.6298, source: "user" },
+    "chicago il": { city: "Chicago", state: "IL", zipCode: "60601", latitude: 41.8781, longitude: -87.6298, source: "user" },
+  };
+  if (aliases[normalized]) return aliases[normalized];
+  const found = location.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (found) {
+    return {
+      city: "Custom",
+      state: "US",
+      zipCode: "00000",
+      latitude: Number(found[1]),
+      longitude: Number(found[2]),
+      source: "user",
+    };
+  }
+  return null;
+}
+
 function cityCoordinates(location: string): { latitude: number; longitude: number } | null {
   const normalized = location.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const aliases: Record<string, { latitude: number; longitude: number }> = {
@@ -2515,6 +2639,11 @@ function craigslistSites(env: Env): string[] {
 
 function intEnv(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function numberEnv(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseFloat(value ?? "");
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 

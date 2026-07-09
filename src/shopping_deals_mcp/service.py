@@ -247,6 +247,71 @@ class ShoppingDealsService:
             "comparisons": [comparison.model_dump() for comparison in comparisons],
         }
 
+    async def compare_area_prices(
+        self,
+        query: str,
+        *,
+        areas: list[str] | None = None,
+        sources: list[str] | None = None,
+        max_results_per_area: int | None = None,
+        price_min: float | None = None,
+        price_max: float | None = None,
+        condition: str = "any",
+    ) -> dict:
+        selected_areas = areas or [
+            "Miami Beach, FL",
+            "Miami, FL",
+            "Fort Lauderdale, FL",
+            "New York, NY",
+            "Los Angeles, CA",
+        ]
+        selected_sources = sources or ["offerup", "facebook_marketplace", "craigslist"]
+        area_results = []
+        for area in selected_areas:
+            response = await self.search_products(
+                query,
+                sources=selected_sources,
+                max_results_per_source=max_results_per_area,
+                price_min=price_min,
+                price_max=price_max,
+                condition=condition,
+                location=area,
+            )
+            priced = [
+                effective_price(listing)
+                for listing in response.listings
+                if effective_price(listing) is not None
+            ]
+            prices = [price for price in priced if price is not None]
+            area_results.append(
+                {
+                    "area": area,
+                    "searched_at": response.searched_at,
+                    "source_errors": response.source_errors,
+                    "total_results": response.total_results,
+                    "priced_results": len(prices),
+                    "low_price": min(prices) if prices else None,
+                    "median_price": _median(prices),
+                    "high_price": max(prices) if prices else None,
+                    "average_price": round(sum(prices) / len(prices), 2) if prices else None,
+                    "sources_used": response.sources_used,
+                    "listings": [listing.model_dump() for listing in response.listings],
+                }
+            )
+        area_results.sort(
+            key=lambda item: (
+                item["median_price"] is None,
+                item["median_price"] if item["median_price"] is not None else float("inf"),
+                item["area"],
+            )
+        )
+        return {
+            "query": query,
+            "areas": selected_areas,
+            "sources": selected_sources,
+            "area_results": area_results,
+        }
+
     async def get_listing_details(self, source: str, listing_id: str) -> dict:
         source_client = self.sources.get(source)
         if source_client is None:
@@ -711,3 +776,13 @@ def apply_tax_estimates(
             )
         )
     return estimated
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    sorted_values = sorted(values)
+    midpoint = len(sorted_values) // 2
+    if len(sorted_values) % 2:
+        return round(sorted_values[midpoint], 2)
+    return round((sorted_values[midpoint - 1] + sorted_values[midpoint]) / 2, 2)

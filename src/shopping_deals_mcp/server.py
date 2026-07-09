@@ -121,6 +121,28 @@ async def compare_prices(
 
 
 @mcp.tool()
+async def compare_area_prices(
+    query: str,
+    areas: list[str] | None = None,
+    sources: list[str] | None = None,
+    max_results_per_area: int | None = None,
+    price_min: float | None = None,
+    price_max: float | None = None,
+    condition: str = "any",
+) -> dict:
+    """Search the same product across multiple areas and compare local price ranges."""
+    return await service.compare_area_prices(
+        query,
+        areas=areas,
+        sources=sources,
+        max_results_per_area=max_results_per_area,
+        price_min=price_min,
+        price_max=price_max,
+        condition=condition,
+    )
+
+
+@mcp.tool()
 async def get_listing_details(source: str, listing_id: str) -> dict:
     """Fetch listing details for sources that support detail lookups."""
     return await service.get_listing_details(source, listing_id)

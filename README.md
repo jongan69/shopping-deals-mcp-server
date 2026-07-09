@@ -6,6 +6,7 @@ It is built for agents that need to answer questions like:
 
 - "Find the cheapest DJI OSMO Pocket 4P shipped to me."
 - "Compare exact-model prices across marketplaces."
+- "Compare the same item across Miami, New York, Los Angeles, and other local markets."
 - "Avoid accessory listings, wrong variants, and fake low prices with high shipping."
 - "Estimate tax and sort by final landed cost."
 - "Find marketplace items I can buy and flip profitably on eBay."
@@ -17,6 +18,7 @@ It is built for agents that need to answer questions like:
 
 - Searches multiple shopping sources from one MCP interface.
 - Normalizes listings into a common schema.
+- Defaults OfferUp searches to Miami Beach while allowing explicit location overrides.
 - Separates item price, shipping cost, shipped total, estimated tax, and estimated final total.
 - Penalizes accessories, parts, and wrong model variants.
 - Handles edge cases like `Pocket 4P` vs `Pocket 4`.
@@ -34,6 +36,7 @@ It is built for agents that need to answer questions like:
 | `find_best_deals` | Rank strongest deals using price, relevance, condition, source, and warnings. |
 | `find_cheapest_offers` | Filter exact-model offers and sort by shipped total plus estimated tax when supplied. |
 | `compare_prices` | Group comparable listings and summarize observed price ranges. |
+| `compare_area_prices` | Search the same product across multiple areas and compare local listing price ranges. |
 | `get_listing_details` | Fetch source-specific listing details where supported. |
 | `get_ebay_sold_comps` | Estimate resale value from eBay comps. Currently returns active-listing comps as a labeled proxy, not fabricated sold data. |
 | `calculate_resale_profit` | Calculate eBay-style flip profit, ROI, fees, tax, break-even sale price, and max buy price. |
@@ -61,7 +64,7 @@ It is built for agents that need to answer questions like:
 | eBay Browse API | Official eBay item search, shipping, and detail lookups | `EBAY_ACCESS_TOKEN` or `EBAY_APP_ID` + `EBAY_CERT_ID` |
 | Facebook Marketplace public search | Local used marketplace listings | `location` as `latitude,longitude` or `SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE/LONGITUDE`; experimental |
 | Craigslist static search HTML | Local used marketplace listings | none, configure `CRAIGSLIST_SITES` |
-| OfferUp public search | Local used marketplace listings | none |
+| OfferUp public search | Local used marketplace listings, defaulting to Miami Beach with location override support | none |
 | Amazon public search | Amazon product search HTML parser | `SHOPPING_ENABLE_AMAZON_SCRAPE=true`; may be blocked |
 | Google Shopping via SerpApi | Broad retail coverage such as Amazon, Walmart, Target, eBay, merchant sites | `SERPAPI_API_KEY` |
 
@@ -134,6 +137,12 @@ EBAY_USE_SANDBOX=false
 SHOPPING_ENABLE_AMAZON_SCRAPE=true
 SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE=40.7128
 SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE=-74.0060
+SHOPPING_OFFERUP_DEFAULT_CITY=Miami Beach
+SHOPPING_OFFERUP_DEFAULT_STATE=FL
+SHOPPING_OFFERUP_DEFAULT_ZIP=33139
+SHOPPING_OFFERUP_DEFAULT_LATITUDE=25.7907
+SHOPPING_OFFERUP_DEFAULT_LONGITUDE=-80.1300
+SHOPPING_OFFERUP_RADIUS_MILES=30
 SHOPPING_RESALE_STORE_PATH=.shopping-deals/resale-business.json
 ```
 
@@ -458,6 +467,18 @@ Compare prices:
 }
 ```
 
+Compare local areas:
+
+```json
+{
+  "query": "Sony FE 35mm lens",
+  "sources": ["offerup"],
+  "areas": ["Miami Beach, FL", "Miami, FL", "New York, NY", "Los Angeles, CA"],
+  "max_results_per_area": 15,
+  "price_max": 800
+}
+```
+
 ## Configuration
 
 | Variable | Required | Description |
@@ -473,6 +494,12 @@ Compare prices:
 | `SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE` | optional | Default Facebook Marketplace search latitude. |
 | `SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE` | optional | Default Facebook Marketplace search longitude. |
 | `SHOPPING_FACEBOOK_MARKETPLACE_RADIUS_KM` | optional | Facebook Marketplace search radius. Defaults to `16`. |
+| `SHOPPING_OFFERUP_DEFAULT_CITY` | optional | Default OfferUp city. Defaults to `Miami Beach`. |
+| `SHOPPING_OFFERUP_DEFAULT_STATE` | optional | Default OfferUp state. Defaults to `FL`. |
+| `SHOPPING_OFFERUP_DEFAULT_ZIP` | optional | Default OfferUp ZIP. Defaults to `33139`. |
+| `SHOPPING_OFFERUP_DEFAULT_LATITUDE` | optional | Default OfferUp latitude. Defaults to `25.7907`. |
+| `SHOPPING_OFFERUP_DEFAULT_LONGITUDE` | optional | Default OfferUp longitude. Defaults to `-80.1300`. |
+| `SHOPPING_OFFERUP_RADIUS_MILES` | optional | OfferUp search radius hint. Defaults to `30`. |
 | `SHOPPING_ENABLE_AMAZON_SCRAPE` | optional | Enables Amazon public HTML parsing. |
 | `SHOPPING_HTTP_TIMEOUT_SECONDS` | optional | Request timeout. Defaults to `15`. |
 | `SHOPPING_MAX_RESULTS_PER_SOURCE` | optional | Default per-source search size. |
@@ -510,6 +537,7 @@ MIT
 - Always verify seller reputation, return policy, warranty, shipping, taxes, and authenticity before buying.
 - Amazon, Craigslist, Facebook Marketplace, and OfferUp public parsers may break if those sites change markup or block traffic.
 - Facebook Marketplace support is experimental. It uses Facebook's public Marketplace web feed with an anonymous page token and requires a local search center.
+- OfferUp location is set with OfferUp's public `ou.location` cookie. Some markets may still be influenced by OfferUp ranking and availability.
 - Craigslist RSS returns HTTP 403 from Cloudflare Worker egress, so the Worker uses Craigslist static search HTML cards.
 - Tax is estimated from a supplied rate. Final checkout tax may differ.
 - eBay sold-comps support currently uses active listing comps as a labeled proxy until a true completed/sold-listing data provider is configured.

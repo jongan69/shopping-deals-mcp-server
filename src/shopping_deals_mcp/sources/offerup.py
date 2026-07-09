@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import quote_plus
+import re
+from urllib.parse import quote, quote_plus
 
 import httpx
 from bs4 import BeautifulSoup
@@ -27,7 +28,10 @@ class OfferUpSource(MarketplaceSource):
             display_name=self.display_name,
             available=True,
             requires=[],
-            notes="Public OfferUp search parser. Results are local and may vary by inferred location.",
+            notes=(
+                "Public OfferUp search parser. Defaults to Miami Beach and supports "
+                "location overrides through OfferUp's location cookie."
+            ),
         )
 
     async def search(
@@ -40,13 +44,16 @@ class OfferUpSource(MarketplaceSource):
         condition: str = "any",
         location: str | None = None,
     ) -> list[Listing]:
-        url = f"https://offerup.com/search?q={quote_plus(query)}"
+        offerup_location = _resolve_offerup_location(location, self.config)
+        params = f"q={quote_plus(query)}&radius={self.config.offerup_radius_miles}"
+        url = f"https://offerup.com/search?{params}"
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
             ),
             "Accept-Language": "en-US,en;q=0.9",
+            "Cookie": f"ou.location={quote(json.dumps(offerup_location, separators=(',', ':')))}",
         }
         async with httpx.AsyncClient(
             timeout=self.config.http_timeout_seconds,
@@ -57,6 +64,62 @@ class OfferUpSource(MarketplaceSource):
             response.raise_for_status()
 
         return _parse_offerup_html(response.text, max_results, price_min, price_max)
+
+
+def _resolve_offerup_location(location: str | None, config: Settings) -> dict:
+    if location:
+        coordinates = _coordinates_from_location(location)
+        if coordinates:
+            city, state, zip_code, latitude, longitude = coordinates
+            return {
+                "city": city,
+                "state": state,
+                "zipCode": zip_code,
+                "longitude": longitude,
+                "latitude": latitude,
+                "source": "user",
+            }
+    return {
+        "city": config.offerup_default_city,
+        "state": config.offerup_default_state,
+        "zipCode": config.offerup_default_zip,
+        "longitude": config.offerup_default_longitude,
+        "latitude": config.offerup_default_latitude,
+        "source": "default",
+    }
+
+
+def _coordinates_from_location(location: str) -> tuple[str, str, str, float, float] | None:
+    normalized = re.sub(r"[^a-z0-9]+", " ", location.lower()).strip()
+    aliases: dict[str, tuple[str, str, str, float, float]] = {
+        "miami beach": ("Miami Beach", "FL", "33139", 25.7907, -80.1300),
+        "miami beach fl": ("Miami Beach", "FL", "33139", 25.7907, -80.1300),
+        "miami": ("Miami", "FL", "33131", 25.7617, -80.1918),
+        "miami fl": ("Miami", "FL", "33131", 25.7617, -80.1918),
+        "fort lauderdale": ("Fort Lauderdale", "FL", "33301", 26.1224, -80.1373),
+        "fort lauderdale fl": ("Fort Lauderdale", "FL", "33301", 26.1224, -80.1373),
+        "orlando": ("Orlando", "FL", "32801", 28.5383, -81.3792),
+        "orlando fl": ("Orlando", "FL", "32801", 28.5383, -81.3792),
+        "tampa": ("Tampa", "FL", "33602", 27.9506, -82.4572),
+        "tampa fl": ("Tampa", "FL", "33602", 27.9506, -82.4572),
+        "new york": ("New York", "NY", "10001", 40.7128, -74.0060),
+        "new york ny": ("New York", "NY", "10001", 40.7128, -74.0060),
+        "nyc": ("New York", "NY", "10001", 40.7128, -74.0060),
+        "los angeles": ("Los Angeles", "CA", "90012", 34.0522, -118.2437),
+        "los angeles ca": ("Los Angeles", "CA", "90012", 34.0522, -118.2437),
+        "atlanta": ("Atlanta", "GA", "30303", 33.7490, -84.3880),
+        "atlanta ga": ("Atlanta", "GA", "30303", 33.7490, -84.3880),
+        "chicago": ("Chicago", "IL", "60601", 41.8781, -87.6298),
+        "chicago il": ("Chicago", "IL", "60601", 41.8781, -87.6298),
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    found = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", location)
+    if found:
+        latitude = float(found.group(1))
+        longitude = float(found.group(2))
+        return ("Custom", "US", "00000", latitude, longitude)
+    return None
 
 
 def _parse_offerup_html(

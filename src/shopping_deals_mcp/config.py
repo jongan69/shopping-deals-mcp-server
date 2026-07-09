@@ -71,6 +71,12 @@ class Settings:
         "SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE"
     )
     facebook_marketplace_radius_km: int = _env_int("SHOPPING_FACEBOOK_MARKETPLACE_RADIUS_KM", 16)
+    offerup_default_city: str = os.getenv("SHOPPING_OFFERUP_DEFAULT_CITY", "Miami Beach")
+    offerup_default_state: str = os.getenv("SHOPPING_OFFERUP_DEFAULT_STATE", "FL")
+    offerup_default_zip: str = os.getenv("SHOPPING_OFFERUP_DEFAULT_ZIP", "33139")
+    offerup_default_latitude: float = _env_float("SHOPPING_OFFERUP_DEFAULT_LATITUDE", 25.7907)
+    offerup_default_longitude: float = _env_float("SHOPPING_OFFERUP_DEFAULT_LONGITUDE", -80.1300)
+    offerup_radius_miles: int = _env_int("SHOPPING_OFFERUP_RADIUS_MILES", 30)
     http_timeout_seconds: float = _env_float("SHOPPING_HTTP_TIMEOUT_SECONDS", 15.0)
     max_results_per_source: int = _env_int("SHOPPING_MAX_RESULTS_PER_SOURCE", 25)
     estimated_tax_rate_percent: float | None = _env_optional_float(
