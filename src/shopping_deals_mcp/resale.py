@@ -353,6 +353,38 @@ class ResaleStore:
         self._write(data)
         return item
 
+    def save_vehicle_lead(self, payload: dict[str, Any]) -> dict[str, Any]:
+        data = self._read()
+        lead = {
+            "id": payload.get("id") or f"veh_{uuid.uuid4().hex[:12]}",
+            "status": payload.get("status") or "researching",
+            "created_at": _now(),
+            "updated_at": _now(),
+            **payload,
+        }
+        data["vehicles"][lead["id"]] = lead
+        self._write(data)
+        return lead
+
+    def update_vehicle_status(
+        self,
+        vehicle_id: str,
+        status: str,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        data = self._read()
+        if vehicle_id not in data["vehicles"]:
+            raise KeyError(f"Unknown vehicle lead: {vehicle_id}")
+        lead = data["vehicles"][vehicle_id]
+        lead["status"] = status
+        lead["updated_at"] = _now()
+        if notes:
+            lead.setdefault("notes", [])
+            if isinstance(lead["notes"], list):
+                lead["notes"].append({"at": _now(), "text": notes})
+        self._write(data)
+        return lead
+
     def mark_listed(self, inventory_id: str, listing_url: str, asking_price: float) -> dict[str, Any]:
         data = self._read()
         if inventory_id not in data["inventory"]:
@@ -419,6 +451,7 @@ class ResaleStore:
         net_profit = sum(float((item.get("profit") or {}).get("net_profit") or 0) for item in sold)
         return {
             "lead_count": len(data["leads"]),
+            "vehicle_lead_count": len(data["vehicles"]),
             "inventory_count": len(inventory),
             "active_inventory_count": len(active),
             "sold_count": len(sold),
@@ -433,13 +466,18 @@ class ResaleStore:
             if sold
             else 0.0,
             "leads_by_status": _count_by_status(data["leads"].values()),
+            "vehicle_leads_by_status": _count_by_status(data["vehicles"].values()),
             "inventory_by_status": _count_by_status(inventory),
         }
 
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"leads": {}, "inventory": {}}
-        return json.loads(self.path.read_text())
+            return {"leads": {}, "inventory": {}, "vehicles": {}}
+        data = json.loads(self.path.read_text())
+        data.setdefault("leads", {})
+        data.setdefault("inventory", {})
+        data.setdefault("vehicles", {})
+        return data
 
     def _write(self, data: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

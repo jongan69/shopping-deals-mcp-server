@@ -56,6 +56,7 @@ type SearchResponse = {
 type ResaleData = {
   leads: Record<string, Record<string, unknown>>;
   inventory: Record<string, Record<string, unknown>>;
+  vehicles: Record<string, Record<string, unknown>>;
 };
 
 const SOURCE_NAMES = ["ebay", "facebook_marketplace", "craigslist", "offerup", "amazon"] as const;
@@ -111,6 +112,27 @@ const LEAD_STATUSES = new Set(["watching", "contacted", "offer_made", "purchased
 const DEFAULT_EBAY_FINAL_VALUE_FEE_PERCENT = 13.25;
 const DEFAULT_PAYMENT_FIXED_FEE = 0.40;
 const DEFAULT_PACKING_COST = 2.0;
+const EBAY_MOTORS_LOW_LISTING_FEE = 34;
+const EBAY_MOTORS_HIGH_LISTING_FEE = 79;
+const EBAY_MOTORS_HIGH_PRICE_THRESHOLD = 15000;
+const FLORIDA_DEALER_PRESUMPTION_THRESHOLD = 3;
+const VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2];
+const VIN_TRANSLITERATION: Record<string, number> = {
+  A: 1, B: 2, C: 3, D: 4, E: 5, F: 6, G: 7, H: 8,
+  J: 1, K: 2, L: 3, M: 4, N: 5, P: 7, R: 9,
+  S: 2, T: 3, U: 4, V: 5, W: 6, X: 7, Y: 8, Z: 9,
+  0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
+};
+const MODEL_YEAR_CODES: Record<string, number> = {
+  1: 2001, 2: 2002, 3: 2003, 4: 2004, 5: 2005, 6: 2006, 7: 2007, 8: 2008, 9: 2009,
+  A: 2010, B: 2011, C: 2012, D: 2013, E: 2014, F: 2015, G: 2016, H: 2017,
+  J: 2018, K: 2019, L: 2020, M: 2021, N: 2022, P: 2023, R: 2024, S: 2025,
+  T: 2026, V: 2027, W: 2028, X: 2029, Y: 2030,
+};
+const WMI_COUNTRIES: Record<string, string> = {
+  1: "United States", 2: "Canada", 3: "Mexico", 4: "United States", 5: "United States",
+  J: "Japan", K: "South Korea", S: "United Kingdom", W: "Germany", Y: "Sweden/Finland", Z: "Italy",
+};
 
 const toolText = (payload: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
@@ -482,6 +504,210 @@ function createServer(env: Env) {
     "Summarize leads, inventory, revenue, realized profit, and ROI.",
     {},
     async () => toolText(await calculateBusinessMetrics(env)),
+  );
+
+  server.tool(
+    "decode_vin",
+    "Validate and decode basic VIN structure offline.",
+    { vin: z.string().min(1) },
+    async ({ vin }) => toolText(decodeVin(vin)),
+  );
+
+  server.tool(
+    "calculate_vehicle_flip_profit",
+    "Calculate vehicle flip profit using eBay Motors fees and vehicle-specific costs.",
+    {
+      purchase_price: z.number().nonnegative(),
+      expected_sale_price: z.number().nonnegative(),
+      repair_cost: z.number().nonnegative().optional(),
+      transport_cost: z.number().nonnegative().optional(),
+      inspection_cost: z.number().nonnegative().optional(),
+      detail_cost: z.number().nonnegative().optional(),
+      title_registration_cost: z.number().nonnegative().optional(),
+      sales_tax_rate_percent: z.number().nonnegative().optional(),
+      storage_cost: z.number().nonnegative().optional(),
+      insurance_cost: z.number().nonnegative().optional(),
+      ebay_listing_fee: z.number().nonnegative().optional(),
+      deposit_amount: z.number().nonnegative().optional(),
+      misc_cost: z.number().nonnegative().optional(),
+    },
+    async (args) => toolText(calculateVehicleFlipProfit(args)),
+  );
+
+  server.tool(
+    "score_vehicle_title_risk",
+    "Score title, VIN, lien, odometer, seller-name, and flood-market risk.",
+    {
+      title_status: z.string().optional(),
+      has_title_in_hand: z.boolean().nullable().optional(),
+      vin: z.string().optional(),
+      odometer_discrepancy: z.boolean().optional(),
+      seller_name_matches_title: z.boolean().nullable().optional(),
+      flood_risk_area: z.boolean().optional(),
+      lien_reported: z.boolean().optional(),
+    },
+    async (args) => toolText(scoreVehicleTitleRisk(args)),
+  );
+
+  server.tool(
+    "florida_dealer_threshold_status",
+    "Track Florida's three-vehicle dealer-activity presumption threshold.",
+    {
+      vehicles_sold_or_offered_12mo: z.number().int().nonnegative(),
+      planned_new_vehicle_offers: z.number().int().nonnegative().optional(),
+    },
+    async (args) => toolText(floridaDealerThresholdStatus(args)),
+  );
+
+  server.tool(
+    "find_vehicle_arbitrage_opportunities",
+    "Find vehicle opportunities using eBay Motors comps, costs, and title/dealer risk.",
+    {
+      query: z.string().min(1),
+      buy_sources: z.array(z.string()).optional(),
+      location: z.string().optional(),
+      max_results: z.number().int().positive().optional(),
+      max_results_per_source: z.number().int().positive().optional(),
+      price_max: z.number().optional(),
+      min_profit: z.number().optional(),
+      min_roi_percent: z.number().optional(),
+      repair_cost: z.number().nonnegative().optional(),
+      transport_cost: z.number().nonnegative().optional(),
+      inspection_cost: z.number().nonnegative().optional(),
+      detail_cost: z.number().nonnegative().optional(),
+      title_registration_cost: z.number().nonnegative().optional(),
+      sales_tax_rate_percent: z.number().nonnegative().optional(),
+      storage_cost: z.number().nonnegative().optional(),
+      insurance_cost: z.number().nonnegative().optional(),
+      vehicles_sold_or_offered_12mo: z.number().int().nonnegative().optional(),
+      title_status: z.string().optional(),
+      has_title_in_hand: z.boolean().nullable().optional(),
+    },
+    async (args) => {
+      const compResponse = await searchProducts(env, {
+        query: args.query,
+        sources: ["ebay"],
+        maxResultsPerSource: 50,
+      });
+      const marketComps = buildVehicleMarketComps(args.query, compResponse.listings, 20);
+      const expectedSalePrice = marketComps.recommended_resale_price;
+      if (expectedSalePrice === null) {
+        return toolText({
+          query: args.query,
+          error: "Could not estimate vehicle resale value from eBay Motors active comps.",
+          market_comps: marketComps,
+          opportunities: [],
+        });
+      }
+      const buySources = args.buy_sources?.length ? args.buy_sources : ["facebook_marketplace", "craigslist", "offerup"];
+      const buyResponse = await searchProducts(env, {
+        query: args.query,
+        sources: buySources,
+        location: args.location,
+        maxResultsPerSource: args.max_results_per_source,
+        priceMax: args.price_max,
+      });
+      const titleRisk = scoreVehicleTitleRisk({
+        title_status: args.title_status ?? "unknown",
+        has_title_in_hand: args.has_title_in_hand,
+        flood_risk_area: true,
+      });
+      const dealerThreshold = floridaDealerThresholdStatus({
+        vehicles_sold_or_offered_12mo: args.vehicles_sold_or_offered_12mo ?? 0,
+        planned_new_vehicle_offers: 1,
+      });
+      const minProfit = args.min_profit ?? 2000;
+      const minRoiPercent = args.min_roi_percent ?? 20;
+      const opportunities = buyResponse.listings
+        .map((listing) => {
+          const purchasePrice = effectivePrice(listing);
+          if (purchasePrice === null) return null;
+          const profit = calculateVehicleFlipProfit({
+            purchase_price: purchasePrice,
+            expected_sale_price: expectedSalePrice,
+            repair_cost: args.repair_cost ?? 0,
+            transport_cost: args.transport_cost ?? 500,
+            inspection_cost: args.inspection_cost ?? 150,
+            detail_cost: args.detail_cost ?? 150,
+            title_registration_cost: args.title_registration_cost ?? 450,
+            sales_tax_rate_percent: args.sales_tax_rate_percent ?? 0,
+            storage_cost: args.storage_cost ?? 0,
+            insurance_cost: args.insurance_cost ?? 0,
+          });
+          const opportunity = scoreVehicleOpportunity(args.query, listing, profit, {
+            compCount: marketComps.comp_count,
+            minProfit,
+            minRoiPercent,
+            titleRisk,
+            dealerThreshold,
+          });
+          return profit.net_profit >= minProfit && profit.roi_percent >= minRoiPercent ? opportunity : null;
+        })
+        .filter((value): value is ReturnType<typeof scoreVehicleOpportunity> => value !== null)
+        .sort((a, b) => b.opportunity_score - a.opportunity_score || b.net_profit - a.net_profit || a.risk_score - b.risk_score)
+        .slice(0, args.max_results ?? 10);
+      return toolText({
+        query: args.query,
+        searched_at: buyResponse.searched_at,
+        buy_sources: buySources,
+        sell_side: "ebay_motors",
+        source_errors: buyResponse.source_errors,
+        market_comps: marketComps,
+        assumptions: {
+          repair_cost: args.repair_cost ?? 0,
+          transport_cost: args.transport_cost ?? 500,
+          inspection_cost: args.inspection_cost ?? 150,
+          detail_cost: args.detail_cost ?? 150,
+          title_registration_cost: args.title_registration_cost ?? 450,
+          sales_tax_rate_percent: args.sales_tax_rate_percent ?? 0,
+          storage_cost: args.storage_cost ?? 0,
+          insurance_cost: args.insurance_cost ?? 0,
+          title_status: args.title_status ?? "unknown",
+          has_title_in_hand: args.has_title_in_hand ?? null,
+        },
+        filters: {
+          min_profit: minProfit,
+          min_roi_percent: minRoiPercent,
+          price_max: args.price_max ?? null,
+        },
+        dealer_threshold: dealerThreshold,
+        opportunities,
+      });
+    },
+  );
+
+  server.tool(
+    "draft_ebay_motors_listing",
+    "Draft eBay Motors listing copy and vehicle photo/disclosure checklist.",
+    {
+      year: z.number().int().optional(),
+      make: z.string().optional(),
+      model: z.string().optional(),
+      trim: z.string().optional(),
+      mileage: z.number().int().nonnegative().optional(),
+      title_status: z.string().optional(),
+      known_issues: z.string().optional(),
+      recent_service: z.string().optional(),
+    },
+    async (args) => toolText(draftEbayMotorsListing(args)),
+  );
+
+  server.tool(
+    "save_vehicle_lead",
+    "Save a vehicle research lead into the reseller pipeline. Requires RESALE_KV on the Worker.",
+    { vehicle: z.record(z.string(), z.unknown()) },
+    async ({ vehicle }) => toolText(await saveVehicleLead(env, vehicle)),
+  );
+
+  server.tool(
+    "update_vehicle_status",
+    "Update a vehicle lead status and append optional notes.",
+    {
+      vehicle_id: z.string().min(1),
+      status: z.string().min(1),
+      notes: z.string().optional(),
+    },
+    async (args) => toolText(await updateVehicleStatus(env, args.vehicle_id, args.status, args.notes)),
   );
 
   return server;
@@ -1473,6 +1699,7 @@ async function calculateBusinessMetrics(env: Env) {
   const roiValues = sold.map((item) => numberValue(objectValue(item.profit)?.roi_percent)).filter((value) => value !== 0);
   return {
     lead_count: Object.keys(data.leads).length,
+    vehicle_lead_count: Object.keys(data.vehicles).length,
     inventory_count: inventory.length,
     active_inventory_count: active.length,
     sold_count: sold.length,
@@ -1481,8 +1708,339 @@ async function calculateBusinessMetrics(env: Env) {
     realized_net_profit: roundMoney(realizedProfit),
     average_realized_roi_percent: roiValues.length ? roundMoney(roiValues.reduce((a, b) => a + b, 0) / roiValues.length) : 0,
     leads_by_status: countByStatus(Object.values(data.leads)),
+    vehicle_leads_by_status: countByStatus(Object.values(data.vehicles)),
     inventory_by_status: countByStatus(inventory),
   };
+}
+
+function decodeVin(vin: string) {
+  const normalized = vin.trim().toUpperCase();
+  const validFormat = /^[A-HJ-NPR-Z0-9]{17}$/.test(normalized);
+  const expected = validFormat ? vinCheckDigit(normalized) : null;
+  const actual = validFormat ? normalized[8] : null;
+  return {
+    vin: normalized,
+    valid_format: validFormat,
+    check_digit_valid: expected !== null ? expected === actual : null,
+    check_digit_expected: expected,
+    check_digit_actual: actual,
+    wmi: validFormat ? normalized.slice(0, 3) : null,
+    country: validFormat ? WMI_COUNTRIES[normalized[0] ?? ""] ?? null : null,
+    model_year_code: validFormat ? normalized[9] : null,
+    model_year_estimate: validFormat ? MODEL_YEAR_CODES[normalized[9] ?? ""] ?? null : null,
+    plant_code: validFormat ? normalized[10] : null,
+    serial: validFormat ? normalized.slice(11) : null,
+    limitations: [
+      "Offline VIN decoding only validates format/check digit and estimates year/country.",
+      "Use an authoritative VIN/history provider for make, model, trim, title, accident, lien, and odometer data.",
+    ],
+  };
+}
+
+function calculateVehicleFlipProfit(args: {
+  purchase_price: number;
+  expected_sale_price: number;
+  repair_cost?: number;
+  transport_cost?: number;
+  inspection_cost?: number;
+  detail_cost?: number;
+  title_registration_cost?: number;
+  sales_tax_rate_percent?: number;
+  storage_cost?: number;
+  insurance_cost?: number;
+  ebay_listing_fee?: number;
+  deposit_amount?: number;
+  misc_cost?: number;
+}) {
+  const repairCost = args.repair_cost ?? 0;
+  const transportCost = args.transport_cost ?? 0;
+  const inspectionCost = args.inspection_cost ?? 150;
+  const detailCost = args.detail_cost ?? 150;
+  const titleRegistrationCost = args.title_registration_cost ?? 450;
+  const salesTaxRate = args.sales_tax_rate_percent ?? 0;
+  const storageCost = args.storage_cost ?? 0;
+  const insuranceCost = args.insurance_cost ?? 0;
+  const listingFee = args.ebay_listing_fee ?? ebayMotorsListingFee(args.expected_sale_price);
+  const depositProcessingFee = roundMoney((args.deposit_amount ?? 0) * 0.028);
+  const miscCost = args.misc_cost ?? 0;
+  const salesTax = roundMoney(args.purchase_price * (salesTaxRate / 100));
+  const totalCost = roundMoney(
+    args.purchase_price +
+      salesTax +
+      repairCost +
+      transportCost +
+      inspectionCost +
+      detailCost +
+      titleRegistrationCost +
+      storageCost +
+      insuranceCost +
+      listingFee +
+      depositProcessingFee +
+      miscCost,
+  );
+  const netProfit = roundMoney(args.expected_sale_price - totalCost);
+  const cashRequired = roundMoney(
+    args.purchase_price +
+      salesTax +
+      repairCost +
+      transportCost +
+      inspectionCost +
+      detailCost +
+      titleRegistrationCost +
+      storageCost +
+      insuranceCost +
+      miscCost,
+  );
+  return {
+    purchase_price: roundMoney(args.purchase_price),
+    expected_sale_price: roundMoney(args.expected_sale_price),
+    sales_tax: salesTax,
+    repair_cost: roundMoney(repairCost),
+    transport_cost: roundMoney(transportCost),
+    inspection_cost: roundMoney(inspectionCost),
+    detail_cost: roundMoney(detailCost),
+    title_registration_cost: roundMoney(titleRegistrationCost),
+    storage_cost: roundMoney(storageCost),
+    insurance_cost: roundMoney(insuranceCost),
+    ebay_motors_listing_fee: roundMoney(listingFee),
+    deposit_processing_fee: depositProcessingFee,
+    total_cost: totalCost,
+    net_profit: netProfit,
+    roi_percent: cashRequired ? roundMoney((netProfit / cashRequired) * 100) : 0,
+    break_even_sale_price: totalCost,
+    max_buy_price_for_20_roi: maxVehicleBuyPriceForTarget({
+      expectedSalePrice: args.expected_sale_price,
+      targetRoiPercent: 20,
+      repairCost,
+      transportCost,
+      inspectionCost,
+      detailCost,
+      titleRegistrationCost,
+      salesTaxRatePercent: salesTaxRate,
+      storageCost,
+      insuranceCost,
+      listingFee,
+      depositProcessingFee,
+      miscCost,
+    }),
+  };
+}
+
+function scoreVehicleTitleRisk(args: {
+  title_status?: string;
+  has_title_in_hand?: boolean | null;
+  vin?: string;
+  odometer_discrepancy?: boolean;
+  seller_name_matches_title?: boolean | null;
+  flood_risk_area?: boolean;
+  lien_reported?: boolean;
+}) {
+  const warnings: string[] = [];
+  const blockers: string[] = [];
+  let score = 20;
+  const titleStatus = (args.title_status ?? "unknown").trim().toLowerCase();
+  if (["salvage", "rebuilt", "flood", "parts", "certificate_of_destruction"].includes(titleStatus)) {
+    score += 35;
+    warnings.push("Non-clean title status; resale market and buyer financing may be limited.");
+  } else if (!titleStatus || titleStatus === "unknown") {
+    score += 25;
+    warnings.push("Title status is unknown.");
+  }
+  if (args.has_title_in_hand === false) {
+    score += 35;
+    blockers.push("Seller does not have title in hand.");
+  } else if (args.has_title_in_hand === undefined || args.has_title_in_hand === null) {
+    score += 15;
+    warnings.push("Title-in-hand status is unknown.");
+  }
+  if (args.seller_name_matches_title === false) {
+    score += 30;
+    blockers.push("Seller name does not match title.");
+  } else if (args.seller_name_matches_title === undefined || args.seller_name_matches_title === null) {
+    score += 10;
+    warnings.push("Seller/title name match is unknown.");
+  }
+  if (args.vin) {
+    const decoded = decodeVin(args.vin);
+    if (!decoded.valid_format || decoded.check_digit_valid === false) {
+      score += 30;
+      blockers.push("VIN failed basic validation.");
+    }
+  } else {
+    score += 15;
+    warnings.push("VIN is missing.");
+  }
+  if (args.odometer_discrepancy) {
+    score += 35;
+    blockers.push("Odometer discrepancy reported.");
+  }
+  if (args.lien_reported) {
+    score += 35;
+    blockers.push("Lien reported; payoff/release must be verified before purchase.");
+  }
+  if (args.flood_risk_area ?? true) {
+    score += 10;
+    warnings.push("Flood-risk market; inspect for water intrusion and title branding.");
+  }
+  score = Math.min(score, 100);
+  return {
+    risk_score: score,
+    risk_level: riskLevel(score),
+    blockers,
+    warnings,
+    required_checks: [
+      "Confirm physical title is present before payment.",
+      "Confirm VIN on dash, door jamb, and title match.",
+      "Run vehicle history report.",
+      "Check for liens, salvage/rebuilt/flood branding, and odometer anomalies.",
+      "Use pre-purchase inspection or mobile mechanic before committing.",
+    ],
+  };
+}
+
+function floridaDealerThresholdStatus(args: {
+  vehicles_sold_or_offered_12mo: number;
+  planned_new_vehicle_offers?: number;
+}) {
+  const planned = args.planned_new_vehicle_offers ?? 1;
+  const projected = args.vehicles_sold_or_offered_12mo + planned;
+  return {
+    jurisdiction: "Florida",
+    vehicles_sold_or_offered_12mo: args.vehicles_sold_or_offered_12mo,
+    planned_new_vehicle_offers: planned,
+    projected_12mo_count: projected,
+    dealer_presumption_threshold: FLORIDA_DEALER_PRESUMPTION_THRESHOLD,
+    remaining_before_threshold: Math.max(FLORIDA_DEALER_PRESUMPTION_THRESHOLD - args.vehicles_sold_or_offered_12mo, 0),
+    likely_dealer_activity_presumption: projected >= FLORIDA_DEALER_PRESUMPTION_THRESHOLD,
+    note: "Florida law creates a prima facie presumption of dealer activity at three or more motor vehicles bought, sold, dealt, offered, or displayed for sale in 12 months.",
+  };
+}
+
+function buildVehicleMarketComps(query: string, listings: Listing[], maxComps: number) {
+  return {
+    ...buildResaleComps(query, listings, maxComps),
+    basis: "active_ebay_motors_listing_proxy",
+    limitation: "Uses active eBay listing data as a market proxy. Confirm sold/auction results, trim, mileage, title status, accident history, and location before buying.",
+  };
+}
+
+function scoreVehicleOpportunity(
+  query: string,
+  listing: Listing,
+  profit: ReturnType<typeof calculateVehicleFlipProfit>,
+  options: {
+    compCount: number;
+    minProfit: number;
+    minRoiPercent: number;
+    titleRisk: ReturnType<typeof scoreVehicleTitleRisk>;
+    dealerThreshold: ReturnType<typeof floridaDealerThresholdStatus>;
+  },
+) {
+  const warnings: string[] = [];
+  const blockers = [...options.titleRisk.blockers];
+  const relevance = titleSimilarity(query, listing.title);
+  if (options.compCount < 4) warnings.push("Thin vehicle comp set; resale estimate is weak.");
+  if (profit.net_profit < options.minProfit) warnings.push("Below requested minimum net profit.");
+  if (profit.roi_percent < options.minRoiPercent) warnings.push("Below requested minimum ROI.");
+  if (relevance < 0.45) warnings.push("Weak title match; verify year/make/model/trim manually.");
+  if (options.dealerThreshold.likely_dealer_activity_presumption) warnings.push("Projected Florida activity may trigger dealer-license presumption.");
+  if (["facebook_marketplace", "craigslist", "offerup"].includes(listing.source)) warnings.push("Private/local seller; verify title, VIN, liens, and seller identity.");
+  const riskScore = Math.min(100, options.titleRisk.risk_score + (options.compCount < 4 ? 20 : 0) + (relevance < 0.45 ? 10 : 0));
+  let opportunityScore = (
+    Math.min(Math.max(profit.roi_percent, 0), 100) * 0.35 +
+    (Math.min(Math.max(profit.net_profit, 0), 5000) / 5000) * 45 +
+    Math.max(0, 20 - riskScore * 0.2)
+  );
+  if (blockers.length) opportunityScore = Math.min(opportunityScore, 35);
+  return {
+    listing,
+    net_profit: profit.net_profit,
+    roi_percent: profit.roi_percent,
+    max_buy_price_for_20_roi: profit.max_buy_price_for_20_roi,
+    opportunity_score: roundMoney(opportunityScore),
+    risk_score: riskScore,
+    risk_level: riskLevel(riskScore),
+    warnings: [...warnings, ...options.titleRisk.warnings],
+    blockers,
+    dealer_threshold: options.dealerThreshold,
+  };
+}
+
+function draftEbayMotorsListing(args: {
+  year?: number;
+  make?: string;
+  model?: string;
+  trim?: string;
+  mileage?: number;
+  title_status?: string;
+  known_issues?: string;
+  recent_service?: string;
+}) {
+  const title = [args.year ? String(args.year) : "", args.make ?? "", args.model ?? "", args.trim ?? ""].filter((part) => part.trim()).join(" ");
+  const details = [
+    `Title status: ${args.title_status ?? "clean"}.`,
+    args.mileage !== undefined ? `Mileage: ${args.mileage.toLocaleString()}.` : "Mileage: verify from odometer photo.",
+    "VIN should be provided to serious buyers after screening.",
+  ];
+  if (args.recent_service) details.push(`Recent service: ${args.recent_service}.`);
+  if (args.known_issues) details.push(`Known issues: ${args.known_issues}.`);
+  else details.push("Known issues: none disclosed; buyer inspection welcome.");
+  return {
+    title: title.slice(0, 80),
+    format: "fixed_price_or_auction_with_reserve",
+    description: details.join("\n"),
+    photo_checklist: [
+      "Exterior all four corners",
+      "Interior front/rear seats",
+      "Dashboard with mileage visible",
+      "VIN plate and door jamb sticker",
+      "Engine bay",
+      "Tires and wheels",
+      "Undercarriage/rust areas",
+      "Any damage, warning lights, leaks, or wear",
+      "Title with sensitive info covered",
+    ],
+    required_disclosures: [
+      "Title brand/status",
+      "Known mechanical issues",
+      "Accident/flood history if known",
+      "Odometer accuracy",
+      "Lien/payoff status",
+      "Pickup/payment terms",
+    ],
+    fee_note: "eBay Motors vehicle listings use listing-package fees rather than normal item final value fees.",
+  };
+}
+
+async function saveVehicleLead(env: Env, payload: Record<string, unknown>) {
+  const data = await readResaleData(env);
+  if ("error" in data) return data;
+  const now = new Date().toISOString();
+  const vehicle = {
+    id: typeof payload.id === "string" ? payload.id : `veh_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+    status: typeof payload.status === "string" ? payload.status : "researching",
+    created_at: now,
+    updated_at: now,
+    ...payload,
+  };
+  data.vehicles[String(vehicle.id)] = vehicle;
+  await writeResaleData(env, data);
+  return vehicle;
+}
+
+async function updateVehicleStatus(env: Env, vehicleId: string, status: string, notes?: string) {
+  const data = await readResaleData(env);
+  if ("error" in data) return data;
+  const vehicle = data.vehicles[vehicleId];
+  if (!vehicle) return { error: `Unknown vehicle lead: ${vehicleId}` };
+  vehicle.status = status;
+  vehicle.updated_at = new Date().toISOString();
+  if (notes) {
+    const existingNotes = Array.isArray(vehicle.notes) ? vehicle.notes : [];
+    vehicle.notes = [...existingNotes, { at: new Date().toISOString(), text: notes }];
+  }
+  await writeResaleData(env, data);
+  return vehicle;
 }
 
 async function readResaleData(env: Env): Promise<ResaleData | { error: string; requires: string[] }> {
@@ -1493,7 +2051,7 @@ async function readResaleData(env: Env): Promise<ResaleData | { error: string; r
     };
   }
   const stored = await env.RESALE_KV.get("resale-business", "json") as ResaleData | null;
-  return stored ?? { leads: {}, inventory: {} };
+  return { leads: {}, inventory: {}, vehicles: {}, ...(stored ?? {}) };
 }
 
 async function writeResaleData(env: Env, data: ResaleData): Promise<void> {
@@ -1646,6 +2204,56 @@ function countByStatus(items: Record<string, unknown>[]): Record<string, number>
     counts[status] = (counts[status] ?? 0) + 1;
   }
   return counts;
+}
+
+function ebayMotorsListingFee(expectedSalePrice: number): number {
+  return expectedSalePrice > EBAY_MOTORS_HIGH_PRICE_THRESHOLD
+    ? EBAY_MOTORS_HIGH_LISTING_FEE
+    : EBAY_MOTORS_LOW_LISTING_FEE;
+}
+
+function maxVehicleBuyPriceForTarget(args: {
+  expectedSalePrice: number;
+  targetRoiPercent: number;
+  repairCost: number;
+  transportCost: number;
+  inspectionCost: number;
+  detailCost: number;
+  titleRegistrationCost: number;
+  salesTaxRatePercent: number;
+  storageCost: number;
+  insuranceCost: number;
+  listingFee: number;
+  depositProcessingFee: number;
+  miscCost: number;
+}): number {
+  const fixedCosts = args.repairCost +
+    args.transportCost +
+    args.inspectionCost +
+    args.detailCost +
+    args.titleRegistrationCost +
+    args.storageCost +
+    args.insuranceCost +
+    args.listingFee +
+    args.depositProcessingFee +
+    args.miscCost;
+  const denominator = 1 + args.salesTaxRatePercent / 100 + args.targetRoiPercent / 100;
+  return roundMoney(Math.max((args.expectedSalePrice - fixedCosts) / denominator, 0));
+}
+
+function vinCheckDigit(vin: string): string | null {
+  if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) return null;
+  const total = [...vin].reduce((sum, char, index) =>
+    sum + (VIN_TRANSLITERATION[char] ?? 0) * (VIN_WEIGHTS[index] ?? 0), 0);
+  const remainder = total % 11;
+  return remainder === 10 ? "X" : String(remainder);
+}
+
+function riskLevel(score: number): string {
+  if (score >= 80) return "very_high";
+  if (score >= 60) return "high";
+  if (score >= 40) return "medium";
+  return "low";
 }
 
 function parsePrice(value: unknown): number | null {

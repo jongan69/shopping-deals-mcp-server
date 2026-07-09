@@ -276,6 +276,162 @@ def calculate_business_metrics() -> dict:
     return service.calculate_business_metrics()
 
 
+@mcp.tool()
+def decode_vin(vin: str) -> dict:
+    """Validate and decode basic VIN structure offline."""
+    return service.decode_vin(vin)
+
+
+@mcp.tool()
+def calculate_vehicle_flip_profit(
+    purchase_price: float,
+    expected_sale_price: float,
+    repair_cost: float = 0.0,
+    transport_cost: float = 500.0,
+    inspection_cost: float = 150.0,
+    detail_cost: float = 150.0,
+    title_registration_cost: float = 450.0,
+    sales_tax_rate_percent: float = 0.0,
+    storage_cost: float = 0.0,
+    insurance_cost: float = 0.0,
+    ebay_listing_fee: float | None = None,
+    deposit_amount: float = 0.0,
+    misc_cost: float = 0.0,
+) -> dict:
+    """Calculate vehicle flip profit using eBay Motors fees and vehicle-specific costs."""
+    return service.calculate_vehicle_flip_profit(
+        purchase_price=purchase_price,
+        expected_sale_price=expected_sale_price,
+        repair_cost=repair_cost,
+        transport_cost=transport_cost,
+        inspection_cost=inspection_cost,
+        detail_cost=detail_cost,
+        title_registration_cost=title_registration_cost,
+        sales_tax_rate_percent=sales_tax_rate_percent,
+        storage_cost=storage_cost,
+        insurance_cost=insurance_cost,
+        ebay_listing_fee=ebay_listing_fee,
+        deposit_amount=deposit_amount,
+        misc_cost=misc_cost,
+    )
+
+
+@mcp.tool()
+def score_vehicle_title_risk(
+    title_status: str = "unknown",
+    has_title_in_hand: bool | None = None,
+    vin: str | None = None,
+    odometer_discrepancy: bool = False,
+    seller_name_matches_title: bool | None = None,
+    flood_risk_area: bool = True,
+    lien_reported: bool = False,
+) -> dict:
+    """Score title, VIN, lien, odometer, seller-name, and flood-market risk."""
+    return service.score_vehicle_title_risk(
+        title_status=title_status,
+        has_title_in_hand=has_title_in_hand,
+        vin=vin,
+        odometer_discrepancy=odometer_discrepancy,
+        seller_name_matches_title=seller_name_matches_title,
+        flood_risk_area=flood_risk_area,
+        lien_reported=lien_reported,
+    )
+
+
+@mcp.tool()
+def florida_dealer_threshold_status(
+    vehicles_sold_or_offered_12mo: int,
+    planned_new_vehicle_offers: int = 1,
+) -> dict:
+    """Track Florida's three-vehicle dealer-activity presumption threshold."""
+    return service.florida_dealer_threshold_status(
+        vehicles_sold_or_offered_12mo=vehicles_sold_or_offered_12mo,
+        planned_new_vehicle_offers=planned_new_vehicle_offers,
+    )
+
+
+@mcp.tool()
+async def find_vehicle_arbitrage_opportunities(
+    query: str,
+    buy_sources: list[str] | None = None,
+    location: str | None = None,
+    max_results: int = 10,
+    max_results_per_source: int | None = None,
+    price_max: float | None = None,
+    min_profit: float = 2000.0,
+    min_roi_percent: float = 20.0,
+    repair_cost: float = 0.0,
+    transport_cost: float = 500.0,
+    inspection_cost: float = 150.0,
+    detail_cost: float = 150.0,
+    title_registration_cost: float = 450.0,
+    sales_tax_rate_percent: float = 0.0,
+    storage_cost: float = 0.0,
+    insurance_cost: float = 0.0,
+    vehicles_sold_or_offered_12mo: int = 0,
+    title_status: str = "unknown",
+    has_title_in_hand: bool | None = None,
+) -> dict:
+    """Find vehicle opportunities using eBay Motors comps, costs, and title/dealer risk."""
+    return await service.find_vehicle_arbitrage_opportunities(
+        query,
+        buy_sources=buy_sources,
+        location=location,
+        max_results=max_results,
+        max_results_per_source=max_results_per_source,
+        price_max=price_max,
+        min_profit=min_profit,
+        min_roi_percent=min_roi_percent,
+        repair_cost=repair_cost,
+        transport_cost=transport_cost,
+        inspection_cost=inspection_cost,
+        detail_cost=detail_cost,
+        title_registration_cost=title_registration_cost,
+        sales_tax_rate_percent=sales_tax_rate_percent,
+        storage_cost=storage_cost,
+        insurance_cost=insurance_cost,
+        vehicles_sold_or_offered_12mo=vehicles_sold_or_offered_12mo,
+        title_status=title_status,
+        has_title_in_hand=has_title_in_hand,
+    )
+
+
+@mcp.tool()
+def draft_ebay_motors_listing(
+    year: int | None = None,
+    make: str = "",
+    model: str = "",
+    trim: str = "",
+    mileage: int | None = None,
+    title_status: str = "clean",
+    known_issues: str | None = None,
+    recent_service: str | None = None,
+) -> dict:
+    """Draft eBay Motors listing copy and vehicle photo/disclosure checklist."""
+    return service.draft_ebay_motors_listing(
+        year=year,
+        make=make,
+        model=model,
+        trim=trim,
+        mileage=mileage,
+        title_status=title_status,
+        known_issues=known_issues,
+        recent_service=recent_service,
+    )
+
+
+@mcp.tool()
+def save_vehicle_lead(vehicle: dict) -> dict:
+    """Save a vehicle research lead into the reseller pipeline."""
+    return service.save_vehicle_lead(vehicle)
+
+
+@mcp.tool()
+def update_vehicle_status(vehicle_id: str, status: str, notes: str | None = None) -> dict:
+    """Update a vehicle lead status and append optional notes."""
+    return service.update_vehicle_status(vehicle_id, status, notes)
+
+
 @mcp.resource("shopping://sources")
 def source_resource() -> str:
     """Human-readable shopping source status."""

@@ -27,6 +27,16 @@ from shopping_deals_mcp.resale import (
     score_opportunity,
 )
 from shopping_deals_mcp.sources import build_sources
+from shopping_deals_mcp.vehicle import (
+    VehicleProfitInputs,
+    build_vehicle_market_comps,
+    calculate_vehicle_flip_profit,
+    decode_vin,
+    draft_ebay_motors_listing,
+    florida_dealer_threshold_status,
+    score_vehicle_opportunity,
+    score_vehicle_title_risk,
+)
 
 
 class ShoppingDealsService:
@@ -444,6 +454,227 @@ class ShoppingDealsService:
 
     def calculate_business_metrics(self) -> dict:
         return self.resale_store.metrics()
+
+    def decode_vin(self, vin: str) -> dict:
+        return decode_vin(vin)
+
+    def calculate_vehicle_flip_profit(
+        self,
+        *,
+        purchase_price: float,
+        expected_sale_price: float,
+        repair_cost: float = 0.0,
+        transport_cost: float = 0.0,
+        inspection_cost: float = 150.0,
+        detail_cost: float = 150.0,
+        title_registration_cost: float = 450.0,
+        sales_tax_rate_percent: float = 0.0,
+        storage_cost: float = 0.0,
+        insurance_cost: float = 0.0,
+        ebay_listing_fee: float | None = None,
+        deposit_amount: float = 0.0,
+        misc_cost: float = 0.0,
+    ) -> dict:
+        return calculate_vehicle_flip_profit(
+            VehicleProfitInputs(
+                purchase_price=purchase_price,
+                expected_sale_price=expected_sale_price,
+                repair_cost=repair_cost,
+                transport_cost=transport_cost,
+                inspection_cost=inspection_cost,
+                detail_cost=detail_cost,
+                title_registration_cost=title_registration_cost,
+                sales_tax_rate_percent=sales_tax_rate_percent,
+                storage_cost=storage_cost,
+                insurance_cost=insurance_cost,
+                ebay_listing_fee=ebay_listing_fee,
+                deposit_amount=deposit_amount,
+                misc_cost=misc_cost,
+            )
+        )
+
+    def score_vehicle_title_risk(
+        self,
+        *,
+        title_status: str = "unknown",
+        has_title_in_hand: bool | None = None,
+        vin: str | None = None,
+        odometer_discrepancy: bool = False,
+        seller_name_matches_title: bool | None = None,
+        flood_risk_area: bool = True,
+        lien_reported: bool = False,
+    ) -> dict:
+        return score_vehicle_title_risk(
+            title_status=title_status,
+            has_title_in_hand=has_title_in_hand,
+            vin=vin,
+            odometer_discrepancy=odometer_discrepancy,
+            seller_name_matches_title=seller_name_matches_title,
+            flood_risk_area=flood_risk_area,
+            lien_reported=lien_reported,
+        )
+
+    def florida_dealer_threshold_status(
+        self,
+        *,
+        vehicles_sold_or_offered_12mo: int,
+        planned_new_vehicle_offers: int = 1,
+    ) -> dict:
+        return florida_dealer_threshold_status(
+            vehicles_sold_or_offered_12mo=vehicles_sold_or_offered_12mo,
+            planned_new_vehicle_offers=planned_new_vehicle_offers,
+        )
+
+    async def find_vehicle_arbitrage_opportunities(
+        self,
+        query: str,
+        *,
+        buy_sources: list[str] | None = None,
+        location: str | None = None,
+        max_results: int = 10,
+        max_results_per_source: int | None = None,
+        price_max: float | None = None,
+        min_profit: float = 2_000.0,
+        min_roi_percent: float = 20.0,
+        repair_cost: float = 0.0,
+        transport_cost: float = 500.0,
+        inspection_cost: float = 150.0,
+        detail_cost: float = 150.0,
+        title_registration_cost: float = 450.0,
+        sales_tax_rate_percent: float = 0.0,
+        storage_cost: float = 0.0,
+        insurance_cost: float = 0.0,
+        vehicles_sold_or_offered_12mo: int = 0,
+        title_status: str = "unknown",
+        has_title_in_hand: bool | None = None,
+    ) -> dict:
+        comp_response = await self.search_products(
+            query,
+            sources=["ebay"],
+            max_results_per_source=50,
+        )
+        comps = build_vehicle_market_comps(query, comp_response.listings, max_comps=20)
+        expected_sale_price = comps.get("recommended_resale_price")
+        if expected_sale_price is None:
+            return {
+                "query": query,
+                "error": "Could not estimate vehicle resale value from eBay Motors active comps.",
+                "market_comps": comps,
+                "opportunities": [],
+            }
+
+        sources = buy_sources or ["facebook_marketplace", "craigslist", "offerup"]
+        buy_response = await self.search_products(
+            query,
+            sources=sources,
+            max_results_per_source=max_results_per_source,
+            price_max=price_max,
+            location=location,
+        )
+        title_risk = score_vehicle_title_risk(
+            title_status=title_status,
+            has_title_in_hand=has_title_in_hand,
+            flood_risk_area=True,
+        )
+        dealer_threshold = florida_dealer_threshold_status(
+            vehicles_sold_or_offered_12mo=vehicles_sold_or_offered_12mo,
+            planned_new_vehicle_offers=1,
+        )
+        opportunities = []
+        for listing in buy_response.listings:
+            purchase_price = effective_price(listing)
+            if purchase_price is None:
+                continue
+            profit = calculate_vehicle_flip_profit(
+                VehicleProfitInputs(
+                    purchase_price=purchase_price,
+                    expected_sale_price=float(expected_sale_price),
+                    repair_cost=repair_cost,
+                    transport_cost=transport_cost,
+                    inspection_cost=inspection_cost,
+                    detail_cost=detail_cost,
+                    title_registration_cost=title_registration_cost,
+                    sales_tax_rate_percent=sales_tax_rate_percent,
+                    storage_cost=storage_cost,
+                    insurance_cost=insurance_cost,
+                )
+            )
+            opportunity = score_vehicle_opportunity(
+                query,
+                listing,
+                profit,
+                comp_count=int(comps.get("comp_count") or 0),
+                min_profit=min_profit,
+                min_roi_percent=min_roi_percent,
+                title_risk=title_risk,
+                dealer_threshold=dealer_threshold,
+            )
+            if profit["net_profit"] >= min_profit and profit["roi_percent"] >= min_roi_percent:
+                opportunities.append(opportunity)
+
+        opportunities.sort(
+            key=lambda item: (
+                -item["opportunity_score"],
+                -item["net_profit"],
+                item["risk_score"],
+            )
+        )
+        return {
+            "query": query,
+            "searched_at": buy_response.searched_at,
+            "buy_sources": sources,
+            "sell_side": "ebay_motors",
+            "source_errors": buy_response.source_errors,
+            "market_comps": comps,
+            "assumptions": {
+                "repair_cost": repair_cost,
+                "transport_cost": transport_cost,
+                "inspection_cost": inspection_cost,
+                "detail_cost": detail_cost,
+                "title_registration_cost": title_registration_cost,
+                "sales_tax_rate_percent": sales_tax_rate_percent,
+                "storage_cost": storage_cost,
+                "insurance_cost": insurance_cost,
+                "title_status": title_status,
+                "has_title_in_hand": has_title_in_hand,
+            },
+            "filters": {
+                "min_profit": min_profit,
+                "min_roi_percent": min_roi_percent,
+                "price_max": price_max,
+            },
+            "dealer_threshold": dealer_threshold,
+            "opportunities": opportunities[:max_results],
+        }
+
+    def draft_ebay_motors_listing(
+        self,
+        *,
+        year: int | None = None,
+        make: str = "",
+        model: str = "",
+        trim: str = "",
+        mileage: int | None = None,
+        title_status: str = "clean",
+        known_issues: str | None = None,
+        recent_service: str | None = None,
+    ) -> dict:
+        return draft_ebay_motors_listing(
+            year=year,
+            make=make,
+            model=model,
+            trim=trim,
+            mileage=mileage,
+            title_status=title_status,
+            known_issues=known_issues,
+            recent_service=recent_service,
+        )
+
+    def save_vehicle_lead(self, vehicle: dict) -> dict:
+        return self.resale_store.save_vehicle_lead(vehicle)
+
+    def update_vehicle_status(self, vehicle_id: str, status: str, notes: str | None = None) -> dict:
+        return self.resale_store.update_vehicle_status(vehicle_id, status, notes)
 
 
 def resolved_tax_rate(tax_rate_percent: float | None) -> float | None:

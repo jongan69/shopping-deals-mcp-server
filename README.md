@@ -9,6 +9,8 @@ It is built for agents that need to answer questions like:
 - "Avoid accessory listings, wrong variants, and fake low prices with high shipping."
 - "Estimate tax and sort by final landed cost."
 - "Find marketplace items I can buy and flip profitably on eBay."
+- "Research whether a used car is worth flipping on eBay Motors before I inspect it."
+- "Track Florida dealer-threshold exposure while evaluating vehicle flips."
 - "Track resale leads, inventory, listed items, sold items, and business metrics."
 
 ## What It Does
@@ -19,6 +21,7 @@ It is built for agents that need to answer questions like:
 - Penalizes accessories, parts, and wrong model variants.
 - Handles edge cases like `Pocket 4P` vs `Pocket 4`.
 - Scores reseller/arbitrage opportunities using eBay comps, estimated fees, shipping, tax, ROI, and risk.
+- Scores vehicle flips separately with eBay Motors listing fees, title/VIN risk, transport, inspection, repairs, storage, and Florida dealer-threshold awareness.
 - Tracks a simple resale pipeline: leads, purchases, inventory, listings, sold items, and realized profit.
 - Can run locally over stdio or remotely as a Cloudflare Worker MCP endpoint.
 
@@ -42,6 +45,14 @@ It is built for agents that need to answer questions like:
 | `mark_inventory_listed` | Mark inventory as listed for sale. |
 | `mark_inventory_sold` | Mark inventory sold and calculate realized profit. |
 | `calculate_business_metrics` | Summarize leads, inventory, invested cash, sold revenue, realized profit, and ROI. |
+| `decode_vin` | Validate basic VIN format/check digit and estimate model year/country offline. |
+| `calculate_vehicle_flip_profit` | Calculate vehicle flip economics using eBay Motors fees and vehicle-specific costs. |
+| `score_vehicle_title_risk` | Score title, VIN, lien, odometer, seller-name, and flood-market risk. |
+| `florida_dealer_threshold_status` | Track Florida's three-vehicle dealer-activity presumption threshold. |
+| `find_vehicle_arbitrage_opportunities` | Search vehicle leads and rank potential eBay Motors flips. |
+| `draft_ebay_motors_listing` | Draft vehicle listing copy, photo checklist, and required disclosures. |
+| `save_vehicle_lead` | Save a vehicle research lead. |
+| `update_vehicle_status` | Update a vehicle lead status and append notes. |
 
 ## Sources
 
@@ -99,7 +110,7 @@ https://shopping-deals-mcp.jonathang132298.workers.dev/health
 
 The hosted Worker uses the maintainer's configured API keys and public marketplace parsers. If you want to use your own eBay, SerpApi, or Cloudflare account, follow the local setup or deployment steps below.
 
-The hosted Worker exposes the reseller tools. Stateful business tools require the Worker's `RESALE_KV` binding; if a deployment has no KV binding, stateless tools such as `find_arbitrage_opportunities`, `calculate_resale_profit`, `get_ebay_sold_comps`, and `draft_ebay_listing` still work, while lead/inventory tools return a clear persistence configuration error.
+The hosted Worker exposes the reseller and vehicle research tools. Stateful business tools require the Worker's `RESALE_KV` binding; if a deployment has no KV binding, stateless tools such as `find_arbitrage_opportunities`, `find_vehicle_arbitrage_opportunities`, `calculate_resale_profit`, `calculate_vehicle_flip_profit`, `get_ebay_sold_comps`, `decode_vin`, and listing-draft tools still work, while lead/inventory tools return a clear persistence configuration error.
 
 ## Quick Start: Local MCP Server
 
@@ -368,11 +379,62 @@ Then use:
 - `mark_inventory_sold`
 - `calculate_business_metrics`
 
+Research a possible car flip:
+
+```json
+{
+  "query": "2012 Honda Fit Miami",
+  "buy_sources": ["facebook_marketplace", "craigslist", "offerup"],
+  "location": "25.7907,-80.1300",
+  "max_results": 5,
+  "max_results_per_source": 20,
+  "price_max": 7000,
+  "min_profit": 2000,
+  "min_roi_percent": 20,
+  "repair_cost": 750,
+  "transport_cost": 500,
+  "inspection_cost": 150,
+  "detail_cost": 150,
+  "title_registration_cost": 450,
+  "sales_tax_rate_percent": 0,
+  "vehicles_sold_or_offered_12mo": 0,
+  "title_status": "unknown",
+  "has_title_in_hand": null
+}
+```
+
+Calculate vehicle profit directly:
+
+```json
+{
+  "purchase_price": 7000,
+  "expected_sale_price": 10500,
+  "repair_cost": 500,
+  "transport_cost": 400,
+  "inspection_cost": 150,
+  "detail_cost": 150,
+  "title_registration_cost": 450
+}
+```
+
+Track vehicle compliance risk:
+
+```json
+{
+  "vehicles_sold_or_offered_12mo": 2,
+  "planned_new_vehicle_offers": 1
+}
+```
+
 ## Reselling Notes
 
 `get_ebay_sold_comps` is intentionally conservative: today it uses active eBay listing comps as a clearly labeled proxy because the current public eBay Browse API integration does not provide completed/sold listing data. Active comps are useful for initial triage, but confirmed sold comps are better for pricing and sell-through confidence. If you have access to a completed-listing data provider, add it as a dedicated source and keep the `basis` field explicit.
 
 The arbitrage score is a triage signal. Before buying, verify exact model, condition, serial/authenticity, locks/accounts, missing accessories, seller reputation, local safety, shipping dimensions, return risk, and final marketplace fees.
+
+Vehicle flips are scored with a separate model. eBay Motors vehicle listings use package fees instead of the normal item final-value fee model; this server defaults to `$34` at `$15,000` or less and `$79` above `$15,000`, matching eBay's current public help page at the time of implementation. Florida has a low dealer-activity threshold: three or more vehicles bought, sold, dealt, offered, or displayed for sale in a 12-month period creates a prima facie presumption of motor vehicle dealer activity. This server surfaces that threshold, but it does not provide legal advice.
+
+Before buying a vehicle, verify title in hand, VIN match, lien status, odometer, accident/flood history, seller identity, mechanical condition, storage, transport, insurance, tax/title fees, and your legal ability to resell.
 
 Search Facebook Marketplace near New York City:
 
@@ -444,9 +506,11 @@ MIT
 
 - Deal scores are triage signals, not purchase guarantees.
 - Arbitrage scores are triage signals, not guarantees of sell-through, profit, authenticity, or buyer demand.
+- Vehicle opportunity scores are research signals, not legal, title, mechanical, tax, insurance, or dealer-licensing advice.
 - Always verify seller reputation, return policy, warranty, shipping, taxes, and authenticity before buying.
 - Amazon, Craigslist, Facebook Marketplace, and OfferUp public parsers may break if those sites change markup or block traffic.
 - Facebook Marketplace support is experimental. It uses Facebook's public Marketplace web feed with an anonymous page token and requires a local search center.
 - Craigslist RSS returns HTTP 403 from Cloudflare Worker egress, so the Worker uses Craigslist static search HTML cards.
 - Tax is estimated from a supplied rate. Final checkout tax may differ.
 - eBay sold-comps support currently uses active listing comps as a labeled proxy until a true completed/sold-listing data provider is configured.
+- Vehicle comps currently use active eBay listing data as a market proxy. Confirm sold results, trim, mileage, title status, accident history, location, and vehicle history before buying.
