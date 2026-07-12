@@ -54,6 +54,7 @@ It is built for agents that need to answer questions like:
 | `ebay_get_offers` | List Inventory API offers for a specific connected seller SKU. |
 | `ebay_get_selling_listings` | List active My eBay selling listings using the Trading API, including listings not created by this MCP. |
 | `ebay_get_listing_detail` | Fetch detailed title, description, category, photos, item specifics, and selling status for one listing. |
+| `ebay_get_listing_asset_workbench` | Return actual listing photo URLs, local download commands, edit briefs, video prompts, and upload/revise steps for AI-assisted asset work. |
 | `ebay_revise_listing_copy` | Preview or apply live eBay title/description revisions through Trading API. |
 | `ebay_get_traffic_report` | Fetch eBay Analytics listing/day traffic metrics such as impressions, views, CTR, conversion rate, and transactions. |
 | `ebay_get_listing_performance_dashboard` | Audit active listing assets and performance signals, including photo/video counts, watches, bids, views, and traffic when available. |
@@ -347,9 +348,21 @@ Listing conversion workflow:
 
 1. Call `ebay_get_listing_performance_dashboard` to audit every active listing.
 2. Use `ebay_save_listing_performance_snapshot` before making changes.
-3. Improve the actual listing media: add real item photos, upload approved images with `ebay_create_image_from_url`, upload videos with `ebay_create_video_upload`, and stage live media updates with `ebay_revise_listing_media`.
-4. Keep `apply_immediately=false` until a human has reviewed the staged photo/video payload.
-5. After the listings have had time to collect traffic, save another snapshot and call `ebay_compare_listing_performance_snapshots`.
+3. Call `ebay_get_listing_asset_workbench` for the target listings. This returns the actual eBay photo URLs, safe local download commands, and AI edit/video briefs that require those real photos as references.
+4. Download the actual product photos locally and inspect them.
+5. Improve the actual listing media: add real item photos, make conservative reference-based AI edits, upload approved images with `ebay_create_image_from_url`, upload videos with `ebay_create_video_upload`, and stage live media updates with `ebay_revise_listing_media`.
+6. Keep `apply_immediately=false` until a human has reviewed the staged photo/video payload.
+7. After the listings have had time to collect traffic, save another snapshot and call `ebay_compare_listing_performance_snapshots`.
+
+Actual-photo AI asset workflow:
+
+1. Use `ebay_get_listing_asset_workbench` with one or more `item_ids`.
+2. Run the returned `download_commands`, or download from the returned manifest URLs, into the listed output folder.
+3. Use those downloaded files as required reference images in your image or video tool.
+4. Keep edits as close to the real asset as possible: crop, straighten, exposure, white balance, background cleanup, sharper composition, and inspection-friendly detail crops.
+5. Do not add missing accessories, remove real flaws, change condition, alter labels/model details, fake operation, or generate unreferenced angles/details.
+6. Keep originals and edited outputs together so an agent can audit what changed.
+7. Host finished assets at HTTPS URLs, upload them through `ebay_create_image_from_url` or `ebay_create_video_upload`, then stage changes with `ebay_revise_listing_media`.
 
 The dashboard combines eBay listing state with asset quality signals: photo count, video count, title usage, description length, bids, watches, views, and eBay Analytics traffic metrics when the connected seller token has Analytics access. Traffic metrics can include impressions, total views, click-through rate, sales conversion rate, and transactions.
 

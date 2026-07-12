@@ -707,6 +707,19 @@ function createServer(env: Env) {
   );
 
   server.tool(
+    "ebay_get_listing_asset_workbench",
+    "Prepare actual eBay listing photos for agent download and AI-assisted edits using the real product images as references.",
+    {
+      item_ids: z.array(z.string()).optional(),
+      output_directory: z.string().default("assets/ebay"),
+      include_download_commands: z.boolean().default(true),
+      include_ai_edit_briefs: z.boolean().default(true),
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetListingAssetWorkbench(env, args)),
+  );
+
+  server.tool(
     "ebay_revise_listing_copy",
     "Revise a live eBay listing title and/or description through Trading API. Preview by default; set apply_immediately true to update eBay.",
     {
@@ -2707,6 +2720,75 @@ async function ebayGetListingDetail(env: Env, args: {
   };
 }
 
+async function ebayGetListingAssetWorkbench(env: Env, args: {
+  item_ids?: string[];
+  output_directory?: string;
+  include_download_commands?: boolean;
+  include_ai_edit_briefs?: boolean;
+  connection_id?: string;
+}) {
+  const requestedIds = [...new Set((args.item_ids ?? []).map((id) => id.trim()).filter(Boolean))];
+  const selling = requestedIds.length
+    ? null
+    : await ebayGetSellingListings(env, {
+      entries_per_page: 200,
+      page_number: 1,
+      include_active: true,
+      include_sold: false,
+      include_unsold: false,
+      include_scheduled: false,
+      connection_id: args.connection_id,
+    });
+  const itemIds = requestedIds.length
+    ? requestedIds
+    : (objectValue(selling)?.active_listings as { items?: Array<{ item_id?: string }> } | undefined)?.items
+      ?.map((item) => item.item_id)
+      .filter((id): id is string => Boolean(id)) ?? [];
+  const outputDirectory = (args.output_directory ?? "assets/ebay").replace(/\/+$/, "") || "assets/ebay";
+  const details = await Promise.all(itemIds.map((itemId) =>
+    ebayGetListingDetail(env, { item_id: itemId, connection_id: args.connection_id })
+      .catch((error) => ({ item_id: itemId, ok: false, error: error instanceof Error ? error.message : String(error) })),
+  ));
+  const listings = details.map((detail) => {
+    const item = objectValue(objectValue(detail)?.item);
+    const itemId = typeof item?.item_id === "string" ? item.item_id : String(objectValue(detail)?.item_id ?? "");
+    return listingAssetWorkbenchEntry(itemId, item, outputDirectory, args.include_download_commands !== false, args.include_ai_edit_briefs !== false);
+  });
+  const downloadCommands = args.include_download_commands === false
+    ? []
+    : listings.flatMap((listing) => listing.download_commands);
+  return {
+    generated_at: new Date().toISOString(),
+    listing_count: listings.length,
+    image_count: listings.reduce((total, listing) => total + listing.images.length, 0),
+    output_directory: outputDirectory,
+    workflow: [
+      "Download the actual listing images using the returned commands or manifest URLs.",
+      "Inspect the downloaded photos before choosing edits.",
+      "Use image/video tools with the downloaded product photos as reference images; do not generate unreferenced product details.",
+      "Upload finished HTTPS-hosted assets with ebay_create_image_from_url or ebay_create_video_upload.",
+      "Stage the complete replacement media array with ebay_revise_listing_media and apply only after review.",
+    ],
+    guardrails: actualAssetEditGuardrails(),
+    download_commands: downloadCommands,
+    manifest: {
+      listings: listings.map((listing) => ({
+        item_id: listing.item_id,
+        title: listing.title,
+        url: listing.url,
+        directory: listing.directory,
+        images: listing.images.map((image) => ({
+          index: image.index,
+          source_url: image.source_url,
+          filename: image.filename,
+          path: image.path,
+        })),
+      })),
+    },
+    listings,
+  };
+}
+
 async function ebayReviseListingCopy(env: Env, args: {
   item_id: string;
   title?: string;
@@ -4558,6 +4640,105 @@ function parseMyEbaySellingList(xml: string, listName: string) {
     entries_per_page: xmlNumber(listXml, "EntriesPerPage"),
     items: xmlBlocks(listXml, "Item").map(parseTradingItem),
   };
+}
+
+function listingAssetWorkbenchEntry(
+  itemId: string,
+  item: Record<string, unknown> | null,
+  outputDirectory: string,
+  includeDownloadCommands: boolean,
+  includeAiEditBriefs: boolean,
+) {
+  const title = typeof item?.title === "string" ? decodeHtml(item.title) : "";
+  const directory = `${outputDirectory}/${itemId}`;
+  const pictureUrls = Array.isArray(item?.picture_urls) ? item.picture_urls.map(String).filter(Boolean) : [];
+  const images = pictureUrls.map((url, index) => {
+    const extension = imageExtension(url);
+    const filename = `${String(index + 1).padStart(2, "0")}-${safeFilename(title || itemId).slice(0, 44)}.${extension}`;
+    const path = `${directory}/${filename}`;
+    return {
+      index: index + 1,
+      source_url: url,
+      filename,
+      path,
+      download_command: includeDownloadCommands ? `mkdir -p ${shellQuote(directory)} && curl -L --fail --retry 3 -o ${shellQuote(path)} ${shellQuote(url)}` : null,
+    };
+  });
+  const downloadCommands = images.map((image) => image.download_command).filter((command): command is string => Boolean(command));
+  const assetBriefs = includeAiEditBriefs ? listingAssetEditBriefs(itemId, title, directory, images) : null;
+  return {
+    item_id: itemId,
+    title,
+    url: item?.url ?? null,
+    directory,
+    image_count: images.length,
+    existing_video_ids: Array.isArray(item?.video_ids) ? item.video_ids : [],
+    images,
+    download_commands: downloadCommands,
+    ai_edit_briefs: assetBriefs,
+    upload_and_apply_steps: [
+      "Host each finished edited image or video at an HTTPS URL.",
+      "Call ebay_create_image_from_url for finished still images and keep the returned EPS imageUrl.",
+      "Call ebay_create_video_upload for finished MP4 assets and wait for LIVE status with ebay_get_video.",
+      "Call ebay_get_listing_detail to re-fetch current media, then call ebay_revise_listing_media with the complete intended picture_urls/video_ids array.",
+    ],
+  };
+}
+
+function listingAssetEditBriefs(itemId: string, title: string, directory: string, images: Array<{ path: string; source_url: string; index: number }>) {
+  const referencePaths = images.map((image) => image.path);
+  return {
+    reference_paths: referencePaths,
+    primary_photo_prompt: [
+      `Use the downloaded reference photos for eBay item ${itemId}: ${title}.`,
+      "Create a clean eBay-ready primary product image using the actual item as the source of truth.",
+      "Preserve the exact product, color, shape, logos, labels, scale, wear, defects, and included accessories visible in the reference photos.",
+      "Improve only presentation: crop, straighten, white-balance, exposure, shadows, dust/background cleanup, and neutral background.",
+      "Do not add missing accessories, remove real flaws, change model/serial details, change material, or invent any part of the item.",
+      "No text overlays, badges, fake packaging, fake reflections, hands, props, or environment that suggests a different condition.",
+    ].join(" "),
+    secondary_photo_prompt: [
+      `Using only the actual reference photos in ${directory}, create supplemental listing images that make the real item easier to inspect.`,
+      "Useful variants: close-up crop, bundle/accessory layout, ports/labels/details crop, and flaw-disclosure crop.",
+      "Every generated/edited image must remain faithful to the original product photos and should look like a cleaned-up photo of the same exact item.",
+    ].join(" "),
+    video_prompt: [
+      `Create a 10-20 second eBay product showcase video for item ${itemId}: ${title}, based only on the downloaded real product images.`,
+      "Use subtle motion such as slow pan, zoom, and parallax across the actual photos.",
+      "Preserve condition and inclusions exactly; do not create new angles that reveal details not present in the references.",
+      "Suggested structure: hero view, detail views, accessories/inclusions, condition/flaw close-ups, final full-item view.",
+      "Avoid hype claims, fake demos, fake screens, fake operation, or anything not supported by the reference photos.",
+    ].join(" "),
+  };
+}
+
+function actualAssetEditGuardrails(): string[] {
+  return [
+    "Actual listing photos are the ground truth. Use them as required references for every image or video edit.",
+    "Prefer conservative edits: crop, straighten, exposure, white balance, dust/background cleanup, and clearer composition.",
+    "Do not hide damage, stains, scratches, missing pieces, wear, serial/model labels, or scale cues.",
+    "Do not add accessories, packaging, screen content, logos, reflections, or functionality that is not visible or disclosed.",
+    "Keep a copy of original downloads and edited outputs in the listing asset folder so changes can be audited.",
+    "Before publishing, stage media with ebay_revise_listing_media using apply_immediately=false.",
+  ];
+}
+
+function imageExtension(url: string): string {
+  const clean = url.split("?")[0]?.toLowerCase() ?? "";
+  const extension = clean.match(/\.([a-z0-9]{3,5})$/)?.[1];
+  if (extension && ["jpg", "jpeg", "png", "webp", "gif"].includes(extension)) return extension === "jpeg" ? "jpg" : extension;
+  return "jpg";
+}
+
+function safeFilename(value: string): string {
+  return normalizeText(decodeHtml(value))
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "listing-image";
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function ebayTrafficDateRange(dateFrom?: string, dateTo?: string, lastDays = 7) {
