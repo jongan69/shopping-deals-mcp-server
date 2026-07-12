@@ -137,6 +137,14 @@ const EBAY_MOTORS_HIGH_LISTING_FEE = 79;
 const EBAY_MOTORS_HIGH_PRICE_THRESHOLD = 15000;
 const FLORIDA_DEALER_PRESUMPTION_THRESHOLD = 3;
 const DEFAULT_EBAY_CONNECTION_ID = "default";
+const DEFAULT_EBAY_TRAFFIC_METRICS = [
+  "LISTING_IMPRESSION_TOTAL",
+  "TOTAL_IMPRESSION_TOTAL",
+  "LISTING_VIEWS_TOTAL",
+  "CLICK_THROUGH_RATE",
+  "SALES_CONVERSION_RATE",
+  "TRANSACTION",
+];
 const DEFAULT_EBAY_SELLER_SCOPES = [
   "https://api.ebay.com/oauth/api_scope",
   "https://api.ebay.com/oauth/api_scope/sell.account",
@@ -715,6 +723,101 @@ function createServer(env: Env) {
       connection_id: z.string().optional(),
     },
     async (args) => toolText(await ebayReviseListingCopy(env, args)),
+  );
+
+  server.tool(
+    "ebay_get_traffic_report",
+    "Fetch eBay Analytics traffic metrics by listing or day for the connected seller.",
+    {
+      listing_ids: z.array(z.string()).optional(),
+      date_from: z.string().optional(),
+      date_to: z.string().optional(),
+      last_days: z.number().int().positive().max(730).default(7),
+      dimension: z.enum(["LISTING", "DAY"]).optional(),
+      metrics: z.array(z.string()).optional(),
+      sort: z.string().optional(),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetTrafficReport(env, args)),
+  );
+
+  server.tool(
+    "ebay_get_listing_performance_dashboard",
+    "Audit active listing assets and performance signals, with eBay traffic metrics when available.",
+    {
+      listing_ids: z.array(z.string()).optional(),
+      last_days: z.number().int().positive().max(730).default(7),
+      include_traffic: z.boolean().default(true),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetListingPerformanceDashboard(env, args)),
+  );
+
+  server.tool(
+    "ebay_save_listing_performance_snapshot",
+    "Save the current listing performance dashboard into RESALE_KV for later comparison.",
+    {
+      listing_ids: z.array(z.string()).optional(),
+      last_days: z.number().int().positive().max(730).default(7),
+      include_traffic: z.boolean().default(true),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebaySaveListingPerformanceSnapshot(env, args)),
+  );
+
+  server.tool(
+    "ebay_compare_listing_performance_snapshots",
+    "Compare two saved listing performance snapshots and return per-listing deltas.",
+    {
+      snapshot_id_a: z.string().optional(),
+      snapshot_id_b: z.string().optional(),
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayCompareListingPerformanceSnapshots(env, args)),
+  );
+
+  server.tool(
+    "ebay_create_image_from_url",
+    "Upload an HTTPS image URL to eBay Picture Services through the Media API.",
+    {
+      image_url: z.string().url(),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayCreateImageFromUrl(env, args)),
+  );
+
+  server.tool(
+    "ebay_get_image",
+    "Fetch eBay Media API image status/details and EPS image URL.",
+    {
+      image_id: z.string().min(1),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetImage(env, args)),
+  );
+
+  server.tool(
+    "ebay_revise_listing_media",
+    "Replace photos and/or listing video IDs on a live eBay listing. Preview by default; set apply_immediately true to update eBay.",
+    {
+      item_id: z.string().min(1),
+      picture_urls: z.array(z.string().url()).optional(),
+      video_ids: z.array(z.string()).optional(),
+      listing_policies: z.object({
+        fulfillmentPolicyId: z.string().optional(),
+        paymentPolicyId: z.string().optional(),
+        returnPolicyId: z.string().optional(),
+      }).optional(),
+      preserve_existing_policies: z.boolean().default(true),
+      apply_immediately: z.boolean().default(false),
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayReviseListingMedia(env, args)),
   );
 
   server.tool(
@@ -2664,6 +2767,306 @@ async function ebayReviseListingCopy(env: Env, args: {
   };
 }
 
+async function ebayGetTrafficReport(env: Env, args: {
+  listing_ids?: string[];
+  date_from?: string;
+  date_to?: string;
+  last_days?: number;
+  dimension?: "LISTING" | "DAY";
+  metrics?: string[];
+  sort?: string;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const listingIds = [...new Set((args.listing_ids ?? []).map((id) => id.trim()).filter(Boolean))];
+  const dimension = args.dimension ?? (listingIds.length ? "LISTING" : "DAY");
+  if (dimension === "LISTING" && !listingIds.length) {
+    return { error: "listing_ids is required when dimension is LISTING.", requires: ["listing_ids"] };
+  }
+  const range = ebayTrafficDateRange(args.date_from, args.date_to, args.last_days ?? 7);
+  const filters = dimension === "LISTING"
+    ? [`listing_ids:{${listingIds.join("|")}}`, `date_range:[${range.from}..${range.to}]`]
+    : [`marketplace_ids:{${marketplaceId}}`, `date_range:[${range.from}..${range.to}]`];
+  const metrics = args.metrics?.length ? args.metrics : DEFAULT_EBAY_TRAFFIC_METRICS;
+  const params = new URLSearchParams({
+    dimension,
+    filter: filters.join(","),
+    metric: metrics.join(","),
+  });
+  if (args.sort) params.set("sort", args.sort);
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/sell/analytics/v1/traffic_report?${params}`,
+    { method: "GET" },
+    marketplaceId,
+  );
+  const body = await responseTextOrJson(response);
+  return {
+    status: response.status,
+    ok: response.ok,
+    request: { dimension, filters, metrics, marketplace_id: marketplaceId, date_range: range },
+    response: body,
+    normalized: normalizeTrafficReport(body),
+  };
+}
+
+async function ebayGetListingPerformanceDashboard(env: Env, args: {
+  listing_ids?: string[];
+  last_days?: number;
+  include_traffic?: boolean;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const requestedIds = [...new Set((args.listing_ids ?? []).map((id) => id.trim()).filter(Boolean))];
+  const selling = requestedIds.length
+    ? null
+    : await ebayGetSellingListings(env, {
+      entries_per_page: 200,
+      page_number: 1,
+      include_active: true,
+      include_sold: false,
+      include_unsold: false,
+      include_scheduled: false,
+      connection_id: args.connection_id,
+    });
+  const activeListingIds = requestedIds.length
+    ? requestedIds
+    : (objectValue(selling)?.active_listings as { items?: Array<{ item_id?: string }> } | undefined)?.items
+      ?.map((item) => item.item_id)
+      .filter((id): id is string => Boolean(id)) ?? [];
+  const details = await Promise.all(activeListingIds.map((itemId) =>
+    ebayGetListingDetail(env, { item_id: itemId, connection_id: args.connection_id })
+      .catch((error) => ({ item_id: itemId, ok: false, error: error instanceof Error ? error.message : String(error) })),
+  ));
+  let traffic: Awaited<ReturnType<typeof ebayGetTrafficReport>> | { error: string } | null = null;
+  if (args.include_traffic !== false && activeListingIds.length) {
+    traffic = await ebayGetTrafficReport(env, {
+      listing_ids: activeListingIds,
+      last_days: args.last_days ?? 7,
+      connection_id: args.connection_id,
+      marketplace_id: args.marketplace_id,
+      dimension: "LISTING",
+    }).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+  }
+  const trafficByListing = traffic && !("error" in traffic) ? trafficRecordsByDimension(traffic.normalized, ["LISTING_ID", "LISTING"]) : {};
+  const listings = details.map((detail) => {
+    const item = objectValue(objectValue(detail)?.item);
+    const itemId = typeof item?.item_id === "string" ? item.item_id : String(objectValue(detail)?.item_id ?? "");
+    const assetAudit = auditListingAssets(item);
+    return {
+      item_id: itemId,
+      ok: objectValue(detail)?.ok ?? false,
+      title: item?.title ?? null,
+      url: item?.url ?? null,
+      price: item?.price ?? null,
+      listing_status: item?.listing_status ?? null,
+      listing_type: item?.listing_type ?? null,
+      condition: item?.condition ?? null,
+      bid_count: item?.bid_count ?? null,
+      watch_count: item?.watch_count ?? null,
+      view_count: item?.view_count ?? null,
+      quantity: item?.quantity ?? null,
+      quantity_sold: item?.quantity_sold ?? null,
+      picture_count: assetAudit.picture_count,
+      video_count: assetAudit.video_count,
+      description_length: assetAudit.description_length,
+      asset_score: assetAudit.asset_score,
+      media_recommendations: assetAudit.media_recommendations,
+      traffic: trafficByListing[itemId] ?? null,
+      picture_urls: item?.picture_urls ?? [],
+      video_ids: item?.video_ids ?? [],
+      errors: objectValue(detail)?.errors ?? objectValue(detail)?.error ?? null,
+    };
+  });
+  return {
+    generated_at: new Date().toISOString(),
+    listing_count: listings.length,
+    active_listing_source: requestedIds.length ? "explicit_listing_ids" : "ebay_get_selling_listings",
+    traffic_status: traffic ? ("error" in traffic ? traffic : {
+      ok: traffic.ok,
+      status: traffic.status,
+      request: traffic.request,
+      record_count: Array.isArray(objectValue(traffic.normalized)?.records) ? (objectValue(traffic.normalized)?.records as unknown[]).length : 0,
+    }) : null,
+    summary: summarizeListingPerformance(listings),
+    listings,
+  };
+}
+
+async function ebaySaveListingPerformanceSnapshot(env: Env, args: {
+  listing_ids?: string[];
+  last_days?: number;
+  include_traffic?: boolean;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  if (!env.RESALE_KV) {
+    return {
+      error: "Listing performance snapshots require RESALE_KV.",
+      requires: ["Bind a Cloudflare KV namespace as RESALE_KV"],
+    };
+  }
+  const connectionId = args.connection_id ?? DEFAULT_EBAY_CONNECTION_ID;
+  const dashboard = await ebayGetListingPerformanceDashboard(env, args);
+  const snapshotId = `ebay_perf_${new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+  const snapshot = {
+    id: snapshotId,
+    connection_id: connectionId,
+    created_at: new Date().toISOString(),
+    dashboard,
+  };
+  await env.RESALE_KV.put(ebayListingSnapshotKey(connectionId, snapshotId), JSON.stringify(snapshot));
+  const indexKey = ebayListingSnapshotIndexKey(connectionId);
+  const index = await env.RESALE_KV.get(indexKey, "json") as Array<{ id: string; created_at: string; listing_count: number }> | null;
+  const nextIndex = [
+    { id: snapshotId, created_at: snapshot.created_at, listing_count: dashboard.listing_count },
+    ...(index ?? []),
+  ].slice(0, 50);
+  await env.RESALE_KV.put(indexKey, JSON.stringify(nextIndex));
+  return {
+    snapshot_id: snapshotId,
+    created_at: snapshot.created_at,
+    listing_count: dashboard.listing_count,
+    summary: dashboard.summary,
+  };
+}
+
+async function ebayCompareListingPerformanceSnapshots(env: Env, args: {
+  snapshot_id_a?: string;
+  snapshot_id_b?: string;
+  connection_id?: string;
+}) {
+  if (!env.RESALE_KV) {
+    return {
+      error: "Listing performance snapshot comparison requires RESALE_KV.",
+      requires: ["Bind a Cloudflare KV namespace as RESALE_KV"],
+    };
+  }
+  const connectionId = args.connection_id ?? DEFAULT_EBAY_CONNECTION_ID;
+  const index = await env.RESALE_KV.get(ebayListingSnapshotIndexKey(connectionId), "json") as Array<{ id: string; created_at: string }> | null;
+  const snapshotIdB = args.snapshot_id_b ?? index?.[0]?.id;
+  const snapshotIdA = args.snapshot_id_a ?? index?.[1]?.id;
+  if (!snapshotIdA || !snapshotIdB) {
+    return { error: "Two snapshots are required for comparison.", available_snapshots: index ?? [] };
+  }
+  const [a, b] = await Promise.all([
+    env.RESALE_KV.get(ebayListingSnapshotKey(connectionId, snapshotIdA), "json"),
+    env.RESALE_KV.get(ebayListingSnapshotKey(connectionId, snapshotIdB), "json"),
+  ]) as [Record<string, unknown> | null, Record<string, unknown> | null];
+  if (!a || !b) return { error: "One or both snapshots could not be found.", snapshot_id_a: snapshotIdA, snapshot_id_b: snapshotIdB };
+  return compareListingPerformanceSnapshots(a, b);
+}
+
+async function ebayCreateImageFromUrl(env: Env, args: {
+  image_url: string;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  if (!args.image_url.startsWith("https://")) {
+    return { error: "eBay Media API image-from-URL requires an HTTPS image URL.", image_url: args.image_url };
+  }
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    "/commerce/media/v1_beta/image/create_image_from_url",
+    { method: "POST", body: JSON.stringify({ imageUrl: args.image_url }) },
+    args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US",
+  );
+  const body = await responseTextOrJson(response);
+  const location = response.headers.get("Location");
+  const imageId = locationId(location) || locationId(String(objectValue(body)?.imageId ?? ""));
+  return {
+    status: response.status,
+    ok: response.ok,
+    location,
+    image_id: imageId || null,
+    image_url: objectValue(body)?.imageUrl ?? null,
+    expiration_date: objectValue(body)?.expirationDate ?? null,
+    response: body,
+    next_step: imageId ? "Call ebay_get_image if the EPS URL is not present, then pass the returned imageUrl into ebay_revise_listing_media picture_urls." : null,
+  };
+}
+
+async function ebayGetImage(env: Env, args: { image_id: string; connection_id?: string; marketplace_id?: string }) {
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/commerce/media/v1_beta/image/${encodeURIComponent(args.image_id)}`,
+    { method: "GET" },
+    args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US",
+  );
+  return { status: response.status, ok: response.ok, response: await responseTextOrJson(response) };
+}
+
+async function ebayReviseListingMedia(env: Env, args: {
+  item_id: string;
+  picture_urls?: string[];
+  video_ids?: string[];
+  listing_policies?: {
+    fulfillmentPolicyId?: string;
+    paymentPolicyId?: string;
+    returnPolicyId?: string;
+  };
+  preserve_existing_policies?: boolean;
+  apply_immediately?: boolean;
+  connection_id?: string;
+}) {
+  const pictureUrls = args.picture_urls?.map((url) => url.trim()).filter(Boolean);
+  const videoIds = args.video_ids?.map((id) => id.trim()).filter(Boolean);
+  if (!pictureUrls?.length && !videoIds?.length) {
+    return { error: "Nothing to revise.", requires: ["picture_urls or video_ids"] };
+  }
+  if (pictureUrls && pictureUrls.length > 24) {
+    return { error: "Most eBay categories allow up to 24 pictures.", picture_count: pictureUrls.length };
+  }
+  const listingPolicies = args.listing_policies ?? (args.preserve_existing_policies !== false
+    ? await ebayCurrentListingPolicies(env, args.item_id, args.connection_id)
+    : undefined);
+  const pictureXml = pictureUrls?.length
+    ? `<PictureDetails>${pictureUrls.map((url) => `<PictureURL>${escapeXml(url)}</PictureURL>`).join("")}</PictureDetails>`
+    : "";
+  const videoXml = videoIds?.length
+    ? `<VideoDetails>${videoIds.map((id) => `<VideoID>${escapeXml(id)}</VideoID>`).join("")}</VideoDetails>`
+    : "";
+  const itemXml = `<Item>
+    <ItemID>${escapeXml(args.item_id)}</ItemID>
+    ${pictureXml}
+    ${videoXml}
+    ${tradingSellerProfilesXml(listingPolicies)}
+  </Item>`;
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Version>1227</Version>
+  ${itemXml}
+</ReviseItemRequest>`;
+  if (!args.apply_immediately) {
+    return {
+      preview: true,
+      item_id: args.item_id,
+      picture_count: pictureUrls?.length ?? null,
+      video_count: videoIds?.length ?? null,
+      listing_policies: listingPolicies ?? null,
+      note: "Set apply_immediately=true to send this ReviseItem request to eBay.",
+    };
+  }
+  const response = await ebayTradingApiFetch(env, args.connection_id, "ReviseItem", xml);
+  const responseText = await response.text();
+  const ack = xmlText(responseText, "Ack");
+  return {
+    preview: false,
+    status: response.status,
+    ok: response.ok && ["Success", "Warning"].includes(ack),
+    ack,
+    item_id: xmlText(responseText, "ItemID") || args.item_id,
+    start_time: xmlText(responseText, "StartTime") || null,
+    end_time: xmlText(responseText, "EndTime") || null,
+    fees: parseTradingFees(responseText),
+    errors: parseTradingErrors(responseText),
+  };
+}
+
 async function ebayCurrentListingPolicies(env: Env, itemId: string, connectionId?: string) {
   const detail = await ebayGetListingDetail(env, { item_id: itemId, connection_id: connectionId });
   return objectValue(detail.item)?.seller_profiles as {
@@ -4157,6 +4560,242 @@ function parseMyEbaySellingList(xml: string, listName: string) {
   };
 }
 
+function ebayTrafficDateRange(dateFrom?: string, dateTo?: string, lastDays = 7) {
+  const today = new Date();
+  const to = ebayTrafficDate(dateTo ? parseFlexibleDate(dateTo) : today);
+  const fromDate = dateFrom ? parseFlexibleDate(dateFrom) : new Date(today.getTime() - Math.max(lastDays - 1, 0) * 24 * 60 * 60 * 1000);
+  return { from: ebayTrafficDate(fromDate), to };
+}
+
+function parseFlexibleDate(value: string): Date {
+  const trimmed = value.trim();
+  if (/^\d{8}$/.test(trimmed)) {
+    const year = Number(trimmed.slice(0, 4));
+    const month = Number(trimmed.slice(4, 6)) - 1;
+    const day = Number(trimmed.slice(6, 8));
+    return new Date(Date.UTC(year, month, day));
+  }
+  return new Date(trimmed);
+}
+
+function ebayTrafficDate(date: Date): string {
+  if (Number.isNaN(date.getTime())) return ebayTrafficDate(new Date());
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
+function normalizeTrafficReport(report: unknown) {
+  const body = objectValue(report);
+  const header = objectValue(body?.header);
+  const dimensionKeys = Array.isArray(header?.dimensionKeys)
+    ? header.dimensionKeys.map((entry) => String(objectValue(entry)?.key ?? "")).filter(Boolean)
+    : [];
+  const metricKeys = Array.isArray(header?.metrics)
+    ? header.metrics.map((entry) => String(objectValue(entry)?.key ?? "")).filter(Boolean)
+    : [];
+  const records = Array.isArray(body?.records)
+    ? body.records.map((record) => normalizeTrafficRecord(record, dimensionKeys, metricKeys))
+    : [];
+  return {
+    report_type: body?.reportType ?? null,
+    dimension_keys: dimensionKeys,
+    metric_keys: metricKeys,
+    records,
+    start_date: body?.startDate ?? null,
+    end_date: body?.endDate ?? null,
+    last_updated_date: body?.lastUpdatedDate ?? null,
+  };
+}
+
+function normalizeTrafficRecord(record: unknown, dimensionKeys: string[], metricKeys: string[]) {
+  const raw = objectValue(record);
+  const dimensionValues = Array.isArray(raw?.dimensionValues) ? raw.dimensionValues : [];
+  const metricValues = Array.isArray(raw?.metricValues) ? raw.metricValues : [];
+  const dimensions: Record<string, unknown> = {};
+  const metrics: Record<string, unknown> = {};
+  for (let index = 0; index < dimensionKeys.length; index += 1) {
+    const entry = objectValue(dimensionValues[index]);
+    dimensions[dimensionKeys[index]] = trafficValue(entry);
+  }
+  for (let index = 0; index < metricKeys.length; index += 1) {
+    const entry = objectValue(metricValues[index]);
+    metrics[metricKeys[index]] = trafficValue(entry);
+  }
+  return {
+    dimensions,
+    metrics,
+    raw,
+  };
+}
+
+function trafficValue(entry: Record<string, unknown> | null): unknown {
+  if (!entry) return null;
+  if (entry.applicable === false) return null;
+  const value = entry.value;
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const number = Number(value);
+    return Number.isFinite(number) && value.trim() !== "" ? number : value;
+  }
+  return value ?? null;
+}
+
+function trafficRecordsByDimension(report: unknown, dimensionKeys: string | string[]): Record<string, Record<string, unknown>> {
+  const records = objectValue(report)?.records;
+  if (!Array.isArray(records)) return {};
+  const keys = Array.isArray(dimensionKeys) ? dimensionKeys : [dimensionKeys];
+  const output: Record<string, Record<string, unknown>> = {};
+  for (const record of records) {
+    const normalized = objectValue(record);
+    const dimensions = objectValue(normalized?.dimensions);
+    const metrics = objectValue(normalized?.metrics);
+    const key = keys.map((dimensionKey) => dimensions?.[dimensionKey]).find((value) => value !== undefined && value !== null);
+    if (key !== undefined && key !== null && metrics) output[String(key)] = metrics;
+  }
+  return output;
+}
+
+function auditListingAssets(item: Record<string, unknown> | null) {
+  const pictureUrls = Array.isArray(item?.picture_urls) ? item.picture_urls : [];
+  const videoIds = Array.isArray(item?.video_ids) ? item.video_ids : [];
+  const description = typeof item?.description === "string" ? item.description : "";
+  const title = typeof item?.title === "string" ? item.title : "";
+  const priceRecord = objectValue(item?.price);
+  const price = typeof priceRecord?.value === "number" ? priceRecord.value : null;
+  let score = 0;
+  if (pictureUrls.length >= 8) score += 35;
+  else if (pictureUrls.length >= 5) score += 27;
+  else if (pictureUrls.length >= 3) score += 18;
+  else if (pictureUrls.length >= 1) score += 8;
+  if (videoIds.length) score += 20;
+  if (description.length >= 700) score += 20;
+  else if (description.length >= 350) score += 12;
+  else if (description.length >= 150) score += 6;
+  if (title.length >= 50 && title.length <= 80) score += 10;
+  else if (title.length >= 35) score += 6;
+  if (price !== null && price >= 150 && videoIds.length) score += 5;
+  const recommendations: string[] = [];
+  if (pictureUrls.length < 5) recommendations.push("Add more real item photos: front, back, sides, close-ups, included accessories, and any flaws.");
+  else if (pictureUrls.length < 8) recommendations.push("Add 2-3 additional real photos for close-ups, scale, ports/labels, or bundle contents.");
+  if (!videoIds.length && (price === null || price >= 75)) recommendations.push("Add a short real condition/demo video for buyer confidence.");
+  if (description.length < 350) recommendations.push("Expand the description with condition, exact inclusions, compatibility, tested status, and shipping notes.");
+  if (title.length < 50) recommendations.push("Use more of the 80-character title budget for model, size, bundle, condition, and high-intent keywords.");
+  recommendations.push("Keep the primary image as the actual item; AI edits should only clean presentation without changing condition or included contents.");
+  return {
+    picture_count: pictureUrls.length,
+    video_count: videoIds.length,
+    description_length: description.length,
+    asset_score: Math.min(score, 100),
+    media_recommendations: recommendations,
+  };
+}
+
+function summarizeListingPerformance(listings: Array<Record<string, unknown>>) {
+  const count = listings.length;
+  const pictureCounts = listings.map((listing) => numberValue(listing.picture_count));
+  const videoCounts = listings.map((listing) => numberValue(listing.video_count));
+  const assetScores = listings.map((listing) => numberValue(listing.asset_score));
+  const needsPhotos = listings.filter((listing) => numberValue(listing.picture_count) < 5).length;
+  const needsVideo = listings.filter((listing) => numberValue(listing.video_count) === 0).length;
+  return {
+    listings: count,
+    average_picture_count: count ? roundMoney(sum(pictureCounts) / count) : 0,
+    listings_with_video: listings.filter((listing) => numberValue(listing.video_count) > 0).length,
+    listings_needing_more_photos: needsPhotos,
+    listings_needing_video: needsVideo,
+    average_asset_score: count ? roundMoney(sum(assetScores) / count) : 0,
+    strongest_asset_score: assetScores.length ? Math.max(...assetScores) : 0,
+    weakest_asset_score: assetScores.length ? Math.min(...assetScores) : 0,
+    total_photos: sum(pictureCounts),
+    total_videos: sum(videoCounts),
+  };
+}
+
+function compareListingPerformanceSnapshots(a: Record<string, unknown>, b: Record<string, unknown>) {
+  const listingsA = snapshotListings(a);
+  const listingsB = snapshotListings(b);
+  const ids = [...new Set([...Object.keys(listingsA), ...Object.keys(listingsB)])].sort();
+  return {
+    snapshot_a: snapshotMeta(a),
+    snapshot_b: snapshotMeta(b),
+    listing_count_delta: Object.keys(listingsB).length - Object.keys(listingsA).length,
+    listings: ids.map((id) => compareListingSnapshotItem(id, listingsA[id], listingsB[id])),
+  };
+}
+
+function snapshotMeta(snapshot: Record<string, unknown>) {
+  return {
+    id: snapshot.id ?? null,
+    created_at: snapshot.created_at ?? null,
+    listing_count: objectValue(objectValue(snapshot.dashboard)?.summary)?.listings ?? null,
+    summary: objectValue(objectValue(snapshot.dashboard)?.summary) ?? null,
+  };
+}
+
+function snapshotListings(snapshot: Record<string, unknown>): Record<string, Record<string, unknown>> {
+  const listings = objectValue(snapshot.dashboard)?.listings;
+  if (!Array.isArray(listings)) return {};
+  const output: Record<string, Record<string, unknown>> = {};
+  for (const listing of listings) {
+    const record = objectValue(listing);
+    if (typeof record?.item_id === "string") output[record.item_id] = record;
+  }
+  return output;
+}
+
+function compareListingSnapshotItem(id: string, a?: Record<string, unknown>, b?: Record<string, unknown>) {
+  const fields = ["watch_count", "view_count", "bid_count", "quantity_sold", "picture_count", "video_count", "asset_score", "description_length"];
+  const deltas: Record<string, number | null> = {};
+  for (const field of fields) deltas[field] = numericDelta(a?.[field], b?.[field]);
+  const trafficA = objectValue(a?.traffic);
+  const trafficB = objectValue(b?.traffic);
+  const trafficKeys = [...new Set([...Object.keys(trafficA ?? {}), ...Object.keys(trafficB ?? {})])].sort();
+  const trafficDeltas: Record<string, number | null> = {};
+  for (const key of trafficKeys) trafficDeltas[key] = numericDelta(trafficA?.[key], trafficB?.[key]);
+  return {
+    item_id: id,
+    status: a && b ? "tracked" : a ? "missing_from_new_snapshot" : "new_in_new_snapshot",
+    title: b?.title ?? a?.title ?? null,
+    url: b?.url ?? a?.url ?? null,
+    deltas,
+    traffic_deltas: trafficDeltas,
+    before: a ? compactListingSnapshot(a) : null,
+    after: b ? compactListingSnapshot(b) : null,
+  };
+}
+
+function numericDelta(before: unknown, after: unknown): number | null {
+  if (typeof before !== "number" || typeof after !== "number") return null;
+  return roundMoney(after - before);
+}
+
+function compactListingSnapshot(listing: Record<string, unknown>) {
+  return {
+    watch_count: listing.watch_count ?? null,
+    view_count: listing.view_count ?? null,
+    bid_count: listing.bid_count ?? null,
+    quantity_sold: listing.quantity_sold ?? null,
+    picture_count: listing.picture_count ?? null,
+    video_count: listing.video_count ?? null,
+    asset_score: listing.asset_score ?? null,
+    traffic: listing.traffic ?? null,
+  };
+}
+
+function ebayListingSnapshotKey(connectionId: string, snapshotId: string): string {
+  return `ebay-listing-performance:${connectionId}:${snapshotId}`;
+}
+
+function ebayListingSnapshotIndexKey(connectionId: string): string {
+  return `ebay-listing-performance:${connectionId}:index`;
+}
+
+function sum(values: number[]): number {
+  return values.reduce((total, value) => total + value, 0);
+}
+
 function parseTradingItem(itemXml: string) {
   const listingDetails = xmlBlock(itemXml, "ListingDetails");
   const sellingStatus = xmlBlock(itemXml, "SellingStatus");
@@ -4187,6 +4826,7 @@ function parseTradingItemDetail(itemXml: string) {
   const base = parseTradingItem(itemXml);
   const primaryCategory = xmlBlock(itemXml, "PrimaryCategory");
   const pictureDetails = xmlBlock(itemXml, "PictureDetails");
+  const videoDetails = xmlBlock(itemXml, "VideoDetails");
   const sellingStatus = xmlBlock(itemXml, "SellingStatus");
   return {
     ...base,
@@ -4202,6 +4842,7 @@ function parseTradingItemDetail(itemXml: string) {
     item_specifics: parseNameValueList(xmlBlock(itemXml, "ItemSpecifics")),
     seller_profiles: parseTradingSellerProfiles(xmlBlock(itemXml, "SellerProfiles")),
     picture_urls: xmlBlocks(pictureDetails, "PictureURL").map((block) => decodeHtml(cdata(stripTags(block))).trim()).filter(Boolean),
+    video_ids: xmlBlocks(videoDetails, "VideoID").map((block) => decodeHtml(cdata(stripTags(block))).trim()).filter(Boolean),
     condition_id: xmlText(itemXml, "ConditionID") || null,
     payment_methods: xmlBlocks(itemXml, "PaymentMethods").map((block) => decodeHtml(cdata(stripTags(block))).trim()).filter(Boolean),
     location: xmlText(itemXml, "Location") || null,

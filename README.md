@@ -55,6 +55,13 @@ It is built for agents that need to answer questions like:
 | `ebay_get_selling_listings` | List active My eBay selling listings using the Trading API, including listings not created by this MCP. |
 | `ebay_get_listing_detail` | Fetch detailed title, description, category, photos, item specifics, and selling status for one listing. |
 | `ebay_revise_listing_copy` | Preview or apply live eBay title/description revisions through Trading API. |
+| `ebay_get_traffic_report` | Fetch eBay Analytics listing/day traffic metrics such as impressions, views, CTR, conversion rate, and transactions. |
+| `ebay_get_listing_performance_dashboard` | Audit active listing assets and performance signals, including photo/video counts, watches, bids, views, and traffic when available. |
+| `ebay_save_listing_performance_snapshot` | Save a listing performance dashboard into Worker KV for before/after optimization tracking. |
+| `ebay_compare_listing_performance_snapshots` | Compare two saved snapshots and return listing-level deltas. |
+| `ebay_create_image_from_url` | Upload an HTTPS image URL to eBay Picture Services and return the EPS image URL/image ID. |
+| `ebay_get_image` | Retrieve eBay Media API image details after upload. |
+| `ebay_revise_listing_media` | Preview or apply live eBay photo/video revisions through Trading API. |
 | `ebay_create_offer` | Create an eBay offer for a SKU without publishing it. |
 | `ebay_publish_offer` | Publish an offer as a live eBay listing. |
 | `ebay_create_listing_workflow` | Create inventory, create an offer, and optionally publish after explicit approval. |
@@ -335,6 +342,32 @@ Listing video workflow:
 2. Call `ebay_create_video_upload`.
 3. Poll `ebay_get_video` until eBay finishes processing.
 4. Add the returned `video_id` to `video_ids` in `ebay_upsert_inventory_item`.
+
+Listing conversion workflow:
+
+1. Call `ebay_get_listing_performance_dashboard` to audit every active listing.
+2. Use `ebay_save_listing_performance_snapshot` before making changes.
+3. Improve the actual listing media: add real item photos, upload approved images with `ebay_create_image_from_url`, upload videos with `ebay_create_video_upload`, and stage live media updates with `ebay_revise_listing_media`.
+4. Keep `apply_immediately=false` until a human has reviewed the staged photo/video payload.
+5. After the listings have had time to collect traffic, save another snapshot and call `ebay_compare_listing_performance_snapshots`.
+
+The dashboard combines eBay listing state with asset quality signals: photo count, video count, title usage, description length, bids, watches, views, and eBay Analytics traffic metrics when the connected seller token has Analytics access. Traffic metrics can include impressions, total views, click-through rate, sales conversion rate, and transactions.
+
+For used or pre-owned items, keep the primary image as a real photo of the actual item. AI-generated or edited assets should only improve presentation, such as background cleanup or a supplemental promo visual, and must not change condition, included contents, flaws, serial/model details, or anything a buyer relies on.
+
+Listing photo workflow:
+
+1. Host the finished image at an HTTPS URL.
+2. Call `ebay_create_image_from_url`.
+3. If needed, call `ebay_get_image` with the returned image ID.
+4. Use the returned EPS `imageUrl` in `ebay_revise_listing_media` as part of the complete `picture_urls` array.
+
+Direct Trading API media workflow for existing listings:
+
+1. Call `ebay_get_listing_detail` or `ebay_get_listing_performance_dashboard` to capture the current `picture_urls` and `video_ids`.
+2. Build the complete desired replacement array. eBay media revision replaces the listing's submitted photo/video fields; do not send only one new photo unless you intentionally want only that one photo.
+3. Call `ebay_revise_listing_media` with `apply_immediately=false`.
+4. After review, rerun with `apply_immediately=true`.
 
 Order fulfillment workflow:
 
