@@ -42,6 +42,19 @@ It is built for agents that need to answer questions like:
 | `calculate_resale_profit` | Calculate eBay-style flip profit, ROI, fees, tax, break-even sale price, and max buy price. |
 | `find_arbitrage_opportunities` | Search buy-side marketplaces and rank listings that may be profitable to resell on eBay. |
 | `draft_ebay_listing` | Draft an eBay title, description, price hint, shipping guidance, and photo/disclosure checklist. |
+| `ebay_seller_connect_url` | Create the OAuth consent URL for connecting an eBay seller account. |
+| `ebay_exchange_seller_code` | Exchange an eBay authorization code and store the seller refresh token in Worker KV. |
+| `ebay_seller_connection_status` | Check seller-token configuration and retrieve the connected eBay user profile when possible. |
+| `ebay_get_seller_policies` | Fetch seller business policies, inventory locations, and account readiness. |
+| `ebay_create_inventory_location` | Create the inventory location required before publishing listings. |
+| `ebay_upsert_inventory_item` | Create or update an eBay Inventory API SKU with title, description, photos, aspects, quantity, and videos. |
+| `ebay_create_offer` | Create an eBay offer for a SKU without publishing it. |
+| `ebay_publish_offer` | Publish an offer as a live eBay listing. |
+| `ebay_create_listing_workflow` | Create inventory, create an offer, and optionally publish after explicit approval. |
+| `ebay_create_video_upload` | Create a listing video asset and upload video bytes from a URL. |
+| `ebay_get_video` | Check listing video processing status. |
+| `ebay_get_orders` | Fetch seller orders from eBay Fulfillment API. |
+| `ebay_add_order_tracking` | Add carrier/tracking information to an eBay order. |
 | `save_resale_lead` | Save an arbitrage lead into the reseller pipeline. |
 | `update_resale_lead_status` | Move a lead through `watching`, `contacted`, `offer_made`, `purchased`, `listed`, `sold`, or `rejected`. |
 | `create_inventory_item` | Create a purchased item for inventory tracking. |
@@ -134,6 +147,9 @@ EBAY_CERT_ID=your-ebay-client-secret
 EBAY_DEV_ID=your-ebay-dev-id
 EBAY_MARKETPLACE_ID=EBAY_US
 EBAY_USE_SANDBOX=false
+EBAY_REDIRECT_URI=your-ebay-oauth-redirect-uri-or-runame
+# Optional single-seller shortcut. Prefer OAuth/KV for production.
+EBAY_SELLER_REFRESH_TOKEN=your-connected-seller-refresh-token
 SHOPPING_ENABLE_AMAZON_SCRAPE=true
 SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE=40.7128
 SHOPPING_FACEBOOK_MARKETPLACE_LONGITUDE=-74.0060
@@ -239,6 +255,7 @@ Upload secrets:
 printf '%s' "$EBAY_APP_ID" | npx wrangler secret put EBAY_APP_ID
 printf '%s' "$EBAY_CERT_ID" | npx wrangler secret put EBAY_CERT_ID
 printf '%s' "$EBAY_DEV_ID" | npx wrangler secret put EBAY_DEV_ID
+printf '%s' "$EBAY_REDIRECT_URI" | npx wrangler secret put EBAY_REDIRECT_URI
 ```
 
 Create and bind KV for resale lead/inventory persistence:
@@ -271,6 +288,53 @@ Your remote MCP endpoint will be:
 ```text
 https://your-worker.your-subdomain.workers.dev/mcp
 ```
+
+## eBay Seller Automation
+
+The seller-write tools let an agent help run an eBay sales workflow: connect a seller account, check seller readiness, create inventory, upload listing videos, create offers, publish listings, fetch orders, and add shipment tracking.
+
+Seller-write tools require a **seller user token**. The app keyset belongs to the MCP operator, but listing/order calls act on the eBay account that authorized OAuth. For a multi-user setup, each seller must connect their own eBay account and the Worker stores that seller's refresh token in `RESALE_KV`.
+
+Recommended connection flow:
+
+1. Call `ebay_seller_connect_url`.
+2. Open the returned `authorization_url` and approve access as the eBay seller.
+3. Copy the returned authorization `code`.
+4. Call `ebay_exchange_seller_code` with that code.
+5. Call `ebay_seller_connection_status`.
+6. Call `ebay_get_seller_policies` to retrieve fulfillment/payment/return policies and inventory locations.
+
+Before publishing, the seller account must have:
+
+- Business policies enabled.
+- Payment, return, and fulfillment policies.
+- At least one inventory location.
+- Valid category ID, condition, required item specifics/aspects, price, quantity, and images.
+- Enough eBay seller limits for the listing.
+
+Listing workflow:
+
+1. Use `draft_ebay_listing` to prepare title, description, photo checklist, disclosures, and pricing guidance.
+2. Use `ebay_upsert_inventory_item` to create/update the SKU.
+3. Use `ebay_create_offer` to create the offer.
+4. Use `ebay_publish_offer` only after reviewing the final payload.
+
+For a single combined flow, use `ebay_create_listing_workflow`. It defaults to review mode: it creates inventory and an offer but does **not** publish unless `publish_immediately` is explicitly set to `true`.
+
+Listing video workflow:
+
+1. Host the video at a temporary URL the Worker can fetch.
+2. Call `ebay_create_video_upload`.
+3. Poll `ebay_get_video` until eBay finishes processing.
+4. Add the returned `video_id` to `video_ids` in `ebay_upsert_inventory_item`.
+
+Order fulfillment workflow:
+
+1. Call `ebay_get_orders`.
+2. Ship the item using your carrier workflow.
+3. Call `ebay_add_order_tracking` with the eBay order ID, carrier code, tracking number, and line items.
+
+The MCP is designed for legitimate seller optimization: better listings, better photos/videos, price discipline, fast fulfillment, and complete disclosures. It should not be used for counterfeit goods, spam listings, misleading descriptions, review manipulation, policy evasion, or any other activity that violates eBay policy.
 
 ## Optional Tax Estimates
 
@@ -483,12 +547,15 @@ Compare local areas:
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `EBAY_ACCESS_TOKEN` | optional | Existing eBay OAuth access token. |
-| `EBAY_APP_ID` | recommended | eBay client ID for OAuth client credentials. |
-| `EBAY_CERT_ID` | recommended | eBay client secret for OAuth client credentials. |
+| `EBAY_ACCESS_TOKEN` | optional | Existing eBay app/user access token for Browse API search. |
+| `EBAY_APP_ID` | recommended | eBay client ID for OAuth client credentials and seller OAuth. |
+| `EBAY_CERT_ID` | recommended | eBay client secret for OAuth client credentials and seller OAuth. |
 | `EBAY_DEV_ID` | optional | eBay dev ID, stored for account completeness. |
 | `EBAY_MARKETPLACE_ID` | optional | Defaults to `EBAY_US`. |
 | `EBAY_USE_SANDBOX` | optional | Set `true` for sandbox eBay APIs. |
+| `EBAY_REDIRECT_URI` | required for seller OAuth | eBay OAuth redirect URI/RuName configured in the eBay Developer app. |
+| `EBAY_SELLER_REFRESH_TOKEN` | optional | Single-seller refresh-token shortcut. Prefer `ebay_seller_connect_url` + `ebay_exchange_seller_code` with KV storage for production. |
+| `EBAY_SELLER_ACCESS_TOKEN` | optional | Temporary seller user access token for testing seller-write calls. |
 | `SERPAPI_API_KEY` | optional | Enables Google Shopping via SerpApi. |
 | `CRAIGSLIST_SITES` | optional | Comma-separated Craigslist sites. |
 | `SHOPPING_FACEBOOK_MARKETPLACE_LATITUDE` | optional | Default Facebook Marketplace search latitude. |

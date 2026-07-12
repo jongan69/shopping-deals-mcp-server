@@ -6,6 +6,9 @@ type Env = {
   EBAY_APP_ID?: string;
   EBAY_CERT_ID?: string;
   EBAY_ACCESS_TOKEN?: string;
+  EBAY_SELLER_ACCESS_TOKEN?: string;
+  EBAY_SELLER_REFRESH_TOKEN?: string;
+  EBAY_REDIRECT_URI?: string;
   EBAY_MARKETPLACE_ID?: string;
   EBAY_USE_SANDBOX?: string;
   SERPAPI_API_KEY?: string;
@@ -65,6 +68,17 @@ type ResaleData = {
   vehicles: Record<string, Record<string, unknown>>;
 };
 
+type EbaySellerConnection = {
+  id: string;
+  refresh_token: string;
+  access_token?: string;
+  access_token_expires_at?: number;
+  scope?: string;
+  token_type?: string;
+  created_at: string;
+  updated_at: string;
+};
+
 const SOURCE_NAMES = ["ebay", "facebook_marketplace", "craigslist", "offerup", "amazon"] as const;
 const FACEBOOK_GRAPHQL_URL = "https://www.facebook.com/api/graphql/";
 const FACEBOOK_MARKETPLACE_SEARCH_DOC_ID = "7111939778879383";
@@ -122,6 +136,17 @@ const EBAY_MOTORS_LOW_LISTING_FEE = 34;
 const EBAY_MOTORS_HIGH_LISTING_FEE = 79;
 const EBAY_MOTORS_HIGH_PRICE_THRESHOLD = 15000;
 const FLORIDA_DEALER_PRESUMPTION_THRESHOLD = 3;
+const DEFAULT_EBAY_CONNECTION_ID = "default";
+const DEFAULT_EBAY_SELLER_SCOPES = [
+  "https://api.ebay.com/oauth/api_scope",
+  "https://api.ebay.com/oauth/api_scope/sell.account",
+  "https://api.ebay.com/oauth/api_scope/sell.inventory",
+  "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+  "https://api.ebay.com/oauth/api_scope/sell.finances",
+  "https://api.ebay.com/oauth/api_scope/sell.marketing",
+  "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
+  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+];
 const VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2];
 const VIN_TRANSLITERATION: Record<string, number> = {
   A: 1, B: 2, C: 3, D: 4, E: 5, F: 6, G: 7, H: 8,
@@ -510,6 +535,211 @@ function createServer(env: Env) {
   );
 
   server.tool(
+    "ebay_seller_connect_url",
+    "Create the eBay OAuth consent URL a seller must open to connect their account.",
+    {
+      redirect_uri: z.string().optional(),
+      state: z.string().optional(),
+      scopes: z.array(z.string()).optional(),
+    },
+    async (args) => toolText(ebaySellerConnectUrl(env, args)),
+  );
+
+  server.tool(
+    "ebay_exchange_seller_code",
+    "Exchange an eBay OAuth authorization code for seller tokens and store the refresh token in RESALE_KV.",
+    {
+      code: z.string().min(1),
+      redirect_uri: z.string().optional(),
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayExchangeSellerCode(env, args)),
+  );
+
+  server.tool(
+    "ebay_seller_connection_status",
+    "Check whether a seller connection is configured and retrieve the connected user profile when possible.",
+    {
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebaySellerConnectionStatus(env, args.connection_id)),
+  );
+
+  server.tool(
+    "ebay_get_seller_policies",
+    "Fetch seller fulfillment, payment, return policies, inventory locations, and identity readiness.",
+    {
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetSellerPolicies(env, args)),
+  );
+
+  server.tool(
+    "ebay_create_inventory_location",
+    "Create or replace an eBay inventory location required before publishing offers.",
+    {
+      merchant_location_key: z.string().min(1),
+      name: z.string().min(1),
+      phone: z.string().optional(),
+      address: z.object({
+        addressLine1: z.string().min(1),
+        addressLine2: z.string().optional(),
+        city: z.string().min(1),
+        stateOrProvince: z.string().min(1),
+        postalCode: z.string().min(1),
+        country: z.string().default("US"),
+      }),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayCreateInventoryLocation(env, args)),
+  );
+
+  server.tool(
+    "ebay_upsert_inventory_item",
+    "Create or replace an eBay Inventory API item by SKU.",
+    {
+      sku: z.string().min(1),
+      title: z.string().min(1),
+      description: z.string().min(1),
+      condition: z.string().default("USED_EXCELLENT"),
+      quantity: z.number().int().nonnegative().default(1),
+      image_urls: z.array(z.string()).default([]),
+      video_ids: z.array(z.string()).optional(),
+      aspects: z.record(z.string(), z.array(z.string())).optional(),
+      brand: z.string().optional(),
+      mpn: z.string().optional(),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayUpsertInventoryItem(env, args)),
+  );
+
+  server.tool(
+    "ebay_create_offer",
+    "Create an eBay offer for an existing inventory SKU. Publishing is a separate explicit step.",
+    {
+      sku: z.string().min(1),
+      marketplace_id: z.string().optional(),
+      format: z.string().default("FIXED_PRICE"),
+      category_id: z.string().min(1),
+      merchant_location_key: z.string().min(1),
+      price: z.number().positive(),
+      currency: z.string().default("USD"),
+      quantity_limit_per_buyer: z.number().int().positive().optional(),
+      listing_description: z.string().optional(),
+      listing_policies: z.object({
+        fulfillmentPolicyId: z.string().optional(),
+        paymentPolicyId: z.string().optional(),
+        returnPolicyId: z.string().optional(),
+      }).optional(),
+      store_category_names: z.array(z.string()).optional(),
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayCreateOffer(env, args)),
+  );
+
+  server.tool(
+    "ebay_publish_offer",
+    "Publish an existing eBay offer. This creates or updates a live eBay listing.",
+    {
+      offer_id: z.string().min(1),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayPublishOffer(env, args)),
+  );
+
+  server.tool(
+    "ebay_create_listing_workflow",
+    "Create inventory and an offer, and optionally publish the live eBay listing.",
+    {
+      sku: z.string().min(1),
+      title: z.string().min(1),
+      description: z.string().min(1),
+      condition: z.string().default("USED_EXCELLENT"),
+      quantity: z.number().int().nonnegative().default(1),
+      image_urls: z.array(z.string()).default([]),
+      video_ids: z.array(z.string()).optional(),
+      aspects: z.record(z.string(), z.array(z.string())).optional(),
+      brand: z.string().optional(),
+      mpn: z.string().optional(),
+      category_id: z.string().min(1),
+      merchant_location_key: z.string().min(1),
+      price: z.number().positive(),
+      currency: z.string().default("USD"),
+      listing_policies: z.object({
+        fulfillmentPolicyId: z.string().optional(),
+        paymentPolicyId: z.string().optional(),
+        returnPolicyId: z.string().optional(),
+      }).optional(),
+      store_category_names: z.array(z.string()).optional(),
+      publish_immediately: z.boolean().default(false),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayCreateListingWorkflow(env, args)),
+  );
+
+  server.tool(
+    "ebay_create_video_upload",
+    "Create an eBay listing video and upload video bytes fetched from a URL.",
+    {
+      title: z.string().min(1),
+      video_url: z.string().url(),
+      size: z.number().int().positive().optional(),
+      classification: z.string().default("ITEM"),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayCreateVideoUpload(env, args)),
+  );
+
+  server.tool(
+    "ebay_get_video",
+    "Fetch eBay Media API video processing status.",
+    {
+      video_id: z.string().min(1),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetVideo(env, args)),
+  );
+
+  server.tool(
+    "ebay_get_orders",
+    "Fetch seller orders from eBay Fulfillment API.",
+    {
+      connection_id: z.string().optional(),
+      limit: z.number().int().positive().optional(),
+      order_ids: z.array(z.string()).optional(),
+      creation_date_from: z.string().optional(),
+      creation_date_to: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetOrders(env, args)),
+  );
+
+  server.tool(
+    "ebay_add_order_tracking",
+    "Create a shipping fulfillment with tracking for an eBay order.",
+    {
+      order_id: z.string().min(1),
+      shipment_tracking_number: z.string().min(1),
+      shipping_carrier_code: z.string().min(1),
+      line_items: z.array(z.object({
+        lineItemId: z.string().min(1),
+        quantity: z.number().int().positive(),
+      })).optional(),
+      shipped_date: z.string().optional(),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayAddOrderTracking(env, args)),
+  );
+
+  server.tool(
     "save_resale_lead",
     "Save an arbitrage lead into the reseller pipeline. Requires RESALE_KV on the Worker.",
     { lead: z.record(z.string(), z.unknown()) },
@@ -782,6 +1012,11 @@ export default {
         mcp: `${url.origin}/mcp`,
         sources: listSources(env),
         resale_persistence: Boolean(env.RESALE_KV),
+        ebay_seller_write: {
+          oauth_configured: Boolean(env.EBAY_APP_ID && env.EBAY_CERT_ID && env.EBAY_REDIRECT_URI),
+          seller_token_configured: Boolean(env.EBAY_SELLER_ACCESS_TOKEN || env.EBAY_SELLER_REFRESH_TOKEN),
+          kv_token_storage: Boolean(env.RESALE_KV),
+        },
       });
     }
 
@@ -1664,6 +1899,428 @@ function draftEbayListing(args: {
   };
 }
 
+function ebaySellerConnectUrl(env: Env, args: {
+  redirect_uri?: string;
+  state?: string;
+  scopes?: string[];
+}) {
+  if (!env.EBAY_APP_ID) return { error: "EBAY_APP_ID is not configured." };
+  const redirectUri = args.redirect_uri ?? env.EBAY_REDIRECT_URI;
+  if (!redirectUri) {
+    return {
+      error: "Missing eBay redirect URI/RuName.",
+      requires: ["Set EBAY_REDIRECT_URI or pass redirect_uri"],
+    };
+  }
+  const scopes = args.scopes?.length ? args.scopes : DEFAULT_EBAY_SELLER_SCOPES;
+  const params = new URLSearchParams({
+    client_id: env.EBAY_APP_ID,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: scopes.join(" "),
+    state: args.state ?? crypto.randomUUID(),
+  });
+  return {
+    authorization_url: `${ebayAuthUrl(env)}?${params}`,
+    sandbox: boolEnv(env.EBAY_USE_SANDBOX, false),
+    redirect_uri: redirectUri,
+    scopes,
+    next_step: "Open authorization_url, approve access as the seller, then pass the returned code to ebay_exchange_seller_code.",
+  };
+}
+
+async function ebayExchangeSellerCode(env: Env, args: {
+  code: string;
+  redirect_uri?: string;
+  connection_id?: string;
+}) {
+  if (!env.RESALE_KV) {
+    return {
+      error: "Seller token storage is not configured.",
+      requires: ["Bind a Cloudflare KV namespace as RESALE_KV"],
+    };
+  }
+  const redirectUri = args.redirect_uri ?? env.EBAY_REDIRECT_URI;
+  if (!redirectUri) {
+    return { error: "Missing eBay redirect URI/RuName.", requires: ["Set EBAY_REDIRECT_URI or pass redirect_uri"] };
+  }
+  const payload = await ebayOauthTokenRequest(env, {
+    grant_type: "authorization_code",
+    code: args.code,
+    redirect_uri: redirectUri,
+  });
+  if (!payload.refresh_token) {
+    return {
+      error: "eBay did not return a refresh token. Confirm the authorization code is fresh and the requested scopes include seller scopes.",
+      token_response: redactTokenPayload(payload),
+    };
+  }
+  const now = Date.now();
+  const connection: EbaySellerConnection = {
+    id: args.connection_id ?? DEFAULT_EBAY_CONNECTION_ID,
+    refresh_token: payload.refresh_token,
+    access_token: payload.access_token,
+    access_token_expires_at: payload.expires_in ? now + Math.max(payload.expires_in - 300, 60) * 1000 : undefined,
+    scope: payload.scope,
+    token_type: payload.token_type,
+    created_at: new Date(now).toISOString(),
+    updated_at: new Date(now).toISOString(),
+  };
+  await writeEbaySellerConnection(env, connection);
+  return {
+    connection_id: connection.id,
+    stored: true,
+    sandbox: boolEnv(env.EBAY_USE_SANDBOX, false),
+    scope: connection.scope ?? null,
+    token_type: connection.token_type ?? null,
+    access_token_expires_at: connection.access_token_expires_at ? new Date(connection.access_token_expires_at).toISOString() : null,
+  };
+}
+
+async function ebaySellerConnectionStatus(env: Env, connectionId?: string) {
+  const configured = Boolean(env.EBAY_SELLER_ACCESS_TOKEN || env.EBAY_SELLER_REFRESH_TOKEN || env.RESALE_KV);
+  const connection = await readEbaySellerConnection(env, connectionId);
+  if ("error" in connection) {
+    return {
+      configured,
+      connected: false,
+      ...connection,
+    };
+  }
+  const user = await ebaySellerApiFetch(env, connectionId, "/commerce/identity/v1/user/", { method: "GET" })
+    .then((response) => response.json())
+    .catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+  return {
+    configured,
+    connected: true,
+    connection_id: connection.id,
+    sandbox: boolEnv(env.EBAY_USE_SANDBOX, false),
+    stored_refresh_token: Boolean(connection.refresh_token),
+    access_token_cached: Boolean(connection.access_token),
+    access_token_expires_at: connection.access_token_expires_at ? new Date(connection.access_token_expires_at).toISOString() : null,
+    user,
+  };
+}
+
+async function ebayGetSellerPolicies(env: Env, args: { connection_id?: string; marketplace_id?: string }) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const query = `?marketplace_id=${encodeURIComponent(marketplaceId)}`;
+  const [user, fulfillmentPolicies, paymentPolicies, returnPolicies, locations] = await Promise.all([
+    ebaySellerJson(env, args.connection_id, "/commerce/identity/v1/user/"),
+    ebaySellerJson(env, args.connection_id, `/sell/account/v1/fulfillment_policy${query}`, marketplaceId),
+    ebaySellerJson(env, args.connection_id, `/sell/account/v1/payment_policy${query}`, marketplaceId),
+    ebaySellerJson(env, args.connection_id, `/sell/account/v1/return_policy${query}`, marketplaceId),
+    ebaySellerJson(env, args.connection_id, "/sell/inventory/v1/location", marketplaceId),
+  ]);
+  return {
+    marketplace_id: marketplaceId,
+    user,
+    fulfillment_policies: fulfillmentPolicies,
+    payment_policies: paymentPolicies,
+    return_policies: returnPolicies,
+    inventory_locations: locations,
+    readiness: {
+      has_fulfillment_policy: Array.isArray(objectValue(fulfillmentPolicies)?.fulfillmentPolicies) && (objectValue(fulfillmentPolicies)?.fulfillmentPolicies as unknown[]).length > 0,
+      has_payment_policy: Array.isArray(objectValue(paymentPolicies)?.paymentPolicies) && (objectValue(paymentPolicies)?.paymentPolicies as unknown[]).length > 0,
+      has_return_policy: Array.isArray(objectValue(returnPolicies)?.returnPolicies) && (objectValue(returnPolicies)?.returnPolicies as unknown[]).length > 0,
+      has_inventory_location: Array.isArray(objectValue(locations)?.locations) && (objectValue(locations)?.locations as unknown[]).length > 0,
+    },
+  };
+}
+
+async function ebayCreateInventoryLocation(env: Env, args: {
+  merchant_location_key: string;
+  name: string;
+  phone?: string;
+  address: {
+    addressLine1: string;
+    addressLine2?: string;
+    city: string;
+    stateOrProvince: string;
+    postalCode: string;
+    country?: string;
+  };
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const payload = {
+    name: args.name,
+    locationTypes: ["WAREHOUSE"],
+    merchantLocationStatus: "ENABLED",
+    phone: args.phone,
+    location: {
+      address: {
+        addressLine1: args.address.addressLine1,
+        addressLine2: args.address.addressLine2,
+        city: args.address.city,
+        stateOrProvince: args.address.stateOrProvince,
+        postalCode: args.address.postalCode,
+        country: args.address.country ?? "US",
+      },
+    },
+  };
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/sell/inventory/v1/location/${encodeURIComponent(args.merchant_location_key)}`,
+    { method: "POST", body: JSON.stringify(payload) },
+    marketplaceId,
+  );
+  return {
+    merchant_location_key: args.merchant_location_key,
+    status: response.status,
+    ok: response.ok,
+    response: await responseTextOrJson(response),
+  };
+}
+
+async function ebayUpsertInventoryItem(env: Env, args: {
+  sku: string;
+  title: string;
+  description: string;
+  condition?: string;
+  quantity?: number;
+  image_urls?: string[];
+  video_ids?: string[];
+  aspects?: Record<string, string[]>;
+  brand?: string;
+  mpn?: string;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const payload = ebayInventoryItemPayload(args);
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/sell/inventory/v1/inventory_item/${encodeURIComponent(args.sku)}`,
+    { method: "PUT", body: JSON.stringify(payload) },
+    marketplaceId,
+  );
+  return {
+    sku: args.sku,
+    status: response.status,
+    ok: response.ok,
+    payload,
+    response: await responseTextOrJson(response),
+  };
+}
+
+async function ebayCreateOffer(env: Env, args: {
+  sku: string;
+  marketplace_id?: string;
+  format?: string;
+  category_id: string;
+  merchant_location_key: string;
+  price: number;
+  currency?: string;
+  quantity_limit_per_buyer?: number;
+  listing_description?: string;
+  listing_policies?: {
+    fulfillmentPolicyId?: string;
+    paymentPolicyId?: string;
+    returnPolicyId?: string;
+  };
+  store_category_names?: string[];
+  connection_id?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const payload = ebayOfferPayload(args, marketplaceId);
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    "/sell/inventory/v1/offer",
+    { method: "POST", body: JSON.stringify(payload) },
+    marketplaceId,
+  );
+  const body = await responseTextOrJson(response);
+  return {
+    sku: args.sku,
+    status: response.status,
+    ok: response.ok,
+    offer_id: objectValue(body)?.offerId ?? null,
+    payload,
+    response: body,
+  };
+}
+
+async function ebayPublishOffer(env: Env, args: {
+  offer_id: string;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/sell/inventory/v1/offer/${encodeURIComponent(args.offer_id)}/publish`,
+    { method: "POST" },
+    marketplaceId,
+  );
+  const body = await responseTextOrJson(response);
+  return {
+    offer_id: args.offer_id,
+    status: response.status,
+    ok: response.ok,
+    listing_id: objectValue(body)?.listingId ?? null,
+    response: body,
+  };
+}
+
+async function ebayCreateListingWorkflow(env: Env, args: {
+  sku: string;
+  title: string;
+  description: string;
+  condition?: string;
+  quantity?: number;
+  image_urls?: string[];
+  video_ids?: string[];
+  aspects?: Record<string, string[]>;
+  brand?: string;
+  mpn?: string;
+  category_id: string;
+  merchant_location_key: string;
+  price: number;
+  currency?: string;
+  listing_policies?: {
+    fulfillmentPolicyId?: string;
+    paymentPolicyId?: string;
+    returnPolicyId?: string;
+  };
+  store_category_names?: string[];
+  publish_immediately?: boolean;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const inventory = await ebayUpsertInventoryItem(env, args);
+  if (!inventory.ok) return { step: "inventory_item", inventory };
+  const offer = await ebayCreateOffer(env, args);
+  if (!offer.ok) return { step: "offer", inventory, offer };
+  const offerId = typeof offer.offer_id === "string" ? offer.offer_id : "";
+  if (!args.publish_immediately) {
+    return {
+      step: "ready_to_publish",
+      inventory,
+      offer,
+      publish_command: offerId ? { tool: "ebay_publish_offer", arguments: { offer_id: offerId, connection_id: args.connection_id, marketplace_id: args.marketplace_id } } : null,
+      note: "Offer was created but not published. Call ebay_publish_offer or rerun with publish_immediately=true after human review.",
+    };
+  }
+  if (!offerId) return { step: "publish", inventory, offer, error: "Offer response did not include offerId." };
+  const publish = await ebayPublishOffer(env, { offer_id: offerId, connection_id: args.connection_id, marketplace_id: args.marketplace_id });
+  return { step: "published", inventory, offer, publish };
+}
+
+async function ebayCreateVideoUpload(env: Env, args: {
+  title: string;
+  video_url: string;
+  size?: number;
+  classification?: string;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const createPayload = {
+    title: args.title,
+    classification: args.classification ?? "ITEM",
+    size: args.size,
+  };
+  const createResponse = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    "/commerce/media/v1_beta/video",
+    { method: "POST", body: JSON.stringify(createPayload) },
+    marketplaceId,
+  );
+  const createBody = await responseTextOrJson(createResponse);
+  if (!createResponse.ok) return { step: "create_video", status: createResponse.status, ok: false, response: createBody };
+  const videoId = String(objectValue(createBody)?.videoId ?? objectValue(createBody)?.id ?? locationId(createResponse.headers.get("Location")));
+  if (!videoId) return { step: "create_video", status: createResponse.status, ok: false, response: createBody, error: "No video ID was returned." };
+
+  const videoResponse = await timedFetch(env, args.video_url, { method: "GET" });
+  if (!videoResponse.ok) return { step: "fetch_video_url", video_id: videoId, status: videoResponse.status, ok: false };
+  const contentType = videoResponse.headers.get("content-type") ?? "video/mp4";
+  const uploadResponse = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/commerce/media/v1_beta/video/${encodeURIComponent(videoId)}/upload`,
+    {
+      method: "POST",
+      headers: { "Content-Type": contentType },
+      body: await videoResponse.arrayBuffer(),
+    },
+    marketplaceId,
+  );
+  return {
+    video_id: videoId,
+    create: { status: createResponse.status, ok: createResponse.ok, response: createBody },
+    upload: { status: uploadResponse.status, ok: uploadResponse.ok, response: await responseTextOrJson(uploadResponse) },
+    next_step: "Poll ebay_get_video until processing is complete, then include this video_id in ebay_upsert_inventory_item video_ids.",
+  };
+}
+
+async function ebayGetVideo(env: Env, args: { video_id: string; connection_id?: string; marketplace_id?: string }) {
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/commerce/media/v1_beta/video/${encodeURIComponent(args.video_id)}`,
+    { method: "GET" },
+    args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US",
+  );
+  return { status: response.status, ok: response.ok, response: await responseTextOrJson(response) };
+}
+
+async function ebayGetOrders(env: Env, args: {
+  connection_id?: string;
+  limit?: number;
+  order_ids?: string[];
+  creation_date_from?: string;
+  creation_date_to?: string;
+  marketplace_id?: string;
+}) {
+  const params = new URLSearchParams({ limit: String(Math.min(args.limit ?? 50, 200)) });
+  const filters: string[] = [];
+  if (args.order_ids?.length) filters.push(`orderids:{${args.order_ids.join("|")}}`);
+  if (args.creation_date_from || args.creation_date_to) {
+    filters.push(`creationdate:[${args.creation_date_from ?? ""}..${args.creation_date_to ?? ""}]`);
+  }
+  if (filters.length) params.set("filter", filters.join(","));
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/sell/fulfillment/v1/order?${params}`,
+    { method: "GET" },
+    args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US",
+  );
+  return { status: response.status, ok: response.ok, response: await responseTextOrJson(response) };
+}
+
+async function ebayAddOrderTracking(env: Env, args: {
+  order_id: string;
+  shipment_tracking_number: string;
+  shipping_carrier_code: string;
+  line_items?: { lineItemId: string; quantity: number }[];
+  shipped_date?: string;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const payload = {
+    shippedDate: args.shipped_date ?? new Date().toISOString(),
+    shippingCarrierCode: args.shipping_carrier_code,
+    trackingNumber: args.shipment_tracking_number,
+    lineItems: args.line_items,
+  };
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/sell/fulfillment/v1/order/${encodeURIComponent(args.order_id)}/shipping_fulfillment`,
+    { method: "POST", body: JSON.stringify(payload) },
+    args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US",
+  );
+  return { order_id: args.order_id, status: response.status, ok: response.ok, payload, response: await responseTextOrJson(response) };
+}
+
 async function saveResaleLead(env: Env, payload: Record<string, unknown>) {
   const data = await readResaleData(env);
   if ("error" in data) return data;
@@ -2132,6 +2789,239 @@ async function writeResaleData(env: Env, data: ResaleData): Promise<void> {
   await env.RESALE_KV.put("resale-business", JSON.stringify(data));
 }
 
+async function readEbaySellerConnection(
+  env: Env,
+  connectionId = DEFAULT_EBAY_CONNECTION_ID,
+): Promise<EbaySellerConnection | { error: string; requires: string[] }> {
+  if (env.EBAY_SELLER_REFRESH_TOKEN || env.EBAY_SELLER_ACCESS_TOKEN) {
+    return {
+      id: connectionId,
+      refresh_token: env.EBAY_SELLER_REFRESH_TOKEN ?? "",
+      access_token: env.EBAY_SELLER_ACCESS_TOKEN,
+      created_at: "env",
+      updated_at: "env",
+    };
+  }
+  if (!env.RESALE_KV) {
+    return {
+      error: "No eBay seller connection is configured.",
+      requires: ["Set EBAY_SELLER_REFRESH_TOKEN or bind RESALE_KV and run ebay_exchange_seller_code"],
+    };
+  }
+  const connection = await env.RESALE_KV.get(ebaySellerConnectionKey(connectionId), "json") as EbaySellerConnection | null;
+  if (!connection?.refresh_token) {
+    return {
+      error: `No stored eBay seller connection found for '${connectionId}'.`,
+      requires: ["Run ebay_seller_connect_url and ebay_exchange_seller_code first"],
+    };
+  }
+  return connection;
+}
+
+async function writeEbaySellerConnection(env: Env, connection: EbaySellerConnection): Promise<void> {
+  if (!env.RESALE_KV) throw new Error("RESALE_KV is not configured.");
+  await env.RESALE_KV.put(ebaySellerConnectionKey(connection.id), JSON.stringify(connection));
+}
+
+function ebaySellerConnectionKey(connectionId: string): string {
+  return `ebay-seller:${connectionId}`;
+}
+
+async function ebaySellerAccessToken(env: Env, connectionId?: string): Promise<string> {
+  const connection = await readEbaySellerConnection(env, connectionId);
+  if ("error" in connection) throw new Error(connection.error);
+  if (connection.access_token && (!connection.access_token_expires_at || Date.now() < connection.access_token_expires_at)) {
+    return connection.access_token;
+  }
+  if (!connection.refresh_token) {
+    throw new Error("No eBay seller refresh token is available. Connect a seller account first.");
+  }
+  const payload = await ebayOauthTokenRequest(env, {
+    grant_type: "refresh_token",
+    refresh_token: connection.refresh_token,
+    scope: DEFAULT_EBAY_SELLER_SCOPES.join(" "),
+  });
+  if (!payload.access_token) throw new Error("eBay refresh did not return an access token.");
+  const updated: EbaySellerConnection = {
+    ...connection,
+    access_token: payload.access_token,
+    access_token_expires_at: Date.now() + Math.max((payload.expires_in ?? 7200) - 300, 60) * 1000,
+    scope: payload.scope ?? connection.scope,
+    token_type: payload.token_type ?? connection.token_type,
+    updated_at: new Date().toISOString(),
+  };
+  if (env.RESALE_KV && updated.refresh_token) await writeEbaySellerConnection(env, updated);
+  return payload.access_token;
+}
+
+async function ebayOauthTokenRequest(env: Env, body: Record<string, string>): Promise<{
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  refresh_token_expires_in?: number;
+  token_type?: string;
+  scope?: string;
+}> {
+  if (!env.EBAY_APP_ID || !env.EBAY_CERT_ID) {
+    throw new Error("EBAY_APP_ID and EBAY_CERT_ID are required for eBay OAuth.");
+  }
+  const response = await timedFetch(env, ebayOauthUrl(env), {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${btoa(`${env.EBAY_APP_ID}:${env.EBAY_CERT_ID}`)}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams(body),
+  });
+  const payload = await responseTextOrJson(response);
+  if (!response.ok) {
+    throw new Error(`eBay OAuth failed: HTTP ${response.status} ${JSON.stringify(payload)}`);
+  }
+  return payload as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    refresh_token_expires_in?: number;
+    token_type?: string;
+    scope?: string;
+  };
+}
+
+function redactTokenPayload(payload: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(payload).map(([key, value]) =>
+    key.toLowerCase().includes("token") ? [key, value ? "[redacted]" : value] : [key, value],
+  ));
+}
+
+async function ebaySellerApiFetch(
+  env: Env,
+  connectionId: string | undefined,
+  path: string,
+  init: RequestInit,
+  marketplaceId?: string,
+): Promise<Response> {
+  const token = await ebaySellerAccessToken(env, connectionId);
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  headers.set("Accept", "application/json");
+  if (!headers.has("Content-Type") && init.body !== undefined) headers.set("Content-Type", "application/json");
+  if (marketplaceId) headers.set("X-EBAY-C-MARKETPLACE-ID", marketplaceId);
+  const response = await timedFetch(env, `${ebayApiBase(env)}${path}`, { ...init, headers });
+  if (!response.ok && response.status >= 500) {
+    throw new Error(`eBay API failed: HTTP ${response.status}`);
+  }
+  return response;
+}
+
+async function ebaySellerJson(
+  env: Env,
+  connectionId: string | undefined,
+  path: string,
+  marketplaceId?: string,
+) {
+  try {
+    const response = await ebaySellerApiFetch(env, connectionId, path, { method: "GET" }, marketplaceId);
+    const body = await responseTextOrJson(response);
+    return response.ok ? body : { error: `HTTP ${response.status}`, response: body };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function ebayInventoryItemPayload(args: {
+  title: string;
+  description: string;
+  condition?: string;
+  quantity?: number;
+  image_urls?: string[];
+  video_ids?: string[];
+  aspects?: Record<string, string[]>;
+  brand?: string;
+  mpn?: string;
+}) {
+  return removeUndefined({
+    availability: {
+      shipToLocationAvailability: {
+        quantity: args.quantity ?? 1,
+      },
+    },
+    condition: args.condition ?? "USED_EXCELLENT",
+    product: removeUndefined({
+      title: ebayListingTitle(args.title),
+      description: args.description,
+      imageUrls: args.image_urls ?? [],
+      videoIds: args.video_ids,
+      aspects: args.aspects,
+      brand: args.brand,
+      mpn: args.mpn,
+    }),
+  });
+}
+
+function ebayOfferPayload(args: {
+  sku: string;
+  marketplace_id?: string;
+  format?: string;
+  category_id: string;
+  merchant_location_key: string;
+  price: number;
+  currency?: string;
+  quantity_limit_per_buyer?: number;
+  listing_description?: string;
+  listing_policies?: {
+    fulfillmentPolicyId?: string;
+    paymentPolicyId?: string;
+    returnPolicyId?: string;
+  };
+  store_category_names?: string[];
+}, marketplaceId: string) {
+  return removeUndefined({
+    sku: args.sku,
+    marketplaceId,
+    format: args.format ?? "FIXED_PRICE",
+    availableQuantity: undefined,
+    categoryId: args.category_id,
+    merchantLocationKey: args.merchant_location_key,
+    listingDescription: args.listing_description,
+    listingPolicies: args.listing_policies,
+    pricingSummary: {
+      price: {
+        value: String(roundMoney(args.price)),
+        currency: args.currency ?? "USD",
+      },
+    },
+    quantityLimitPerBuyer: args.quantity_limit_per_buyer,
+    storeCategoryNames: args.store_category_names,
+  });
+}
+
+function removeUndefined<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => removeUndefined(item)) as T;
+  if (!value || typeof value !== "object") return value;
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (entry === undefined) continue;
+    output[key] = removeUndefined(entry);
+  }
+  return output as T;
+}
+
+async function responseTextOrJson(response: Response): Promise<unknown> {
+  if (response.status === 204) return null;
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function locationId(location: string | null): string {
+  if (!location) return "";
+  return location.split("/").filter(Boolean).pop() ?? "";
+}
+
 function dedupeListings(listings: Listing[]): Listing[] {
   const seenUrls = new Set<string>();
   const byTitle = new Map<string, Listing>();
@@ -2507,6 +3397,14 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 
 function ebayBrowseBase(env: Env): string {
   return boolEnv(env.EBAY_USE_SANDBOX, false) ? "https://api.sandbox.ebay.com/buy/browse/v1" : "https://api.ebay.com/buy/browse/v1";
+}
+
+function ebayApiBase(env: Env): string {
+  return boolEnv(env.EBAY_USE_SANDBOX, false) ? "https://api.sandbox.ebay.com" : "https://api.ebay.com";
+}
+
+function ebayAuthUrl(env: Env): string {
+  return boolEnv(env.EBAY_USE_SANDBOX, false) ? "https://auth.sandbox.ebay.com/oauth2/authorize" : "https://auth.ebay.com/oauth2/authorize";
 }
 
 function ebayOauthUrl(env: Env): string {
