@@ -689,6 +689,35 @@ function createServer(env: Env) {
   );
 
   server.tool(
+    "ebay_get_listing_detail",
+    "Fetch detailed active eBay listing data, including description, photos, category, and item specifics.",
+    {
+      item_id: z.string().min(1),
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetListingDetail(env, args)),
+  );
+
+  server.tool(
+    "ebay_revise_listing_copy",
+    "Revise a live eBay listing title and/or description through Trading API. Preview by default; set apply_immediately true to update eBay.",
+    {
+      item_id: z.string().min(1),
+      title: z.string().max(80).optional(),
+      description: z.string().optional(),
+      listing_policies: z.object({
+        fulfillmentPolicyId: z.string().optional(),
+        paymentPolicyId: z.string().optional(),
+        returnPolicyId: z.string().optional(),
+      }).optional(),
+      preserve_existing_policies: z.boolean().default(true),
+      apply_immediately: z.boolean().default(false),
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayReviseListingCopy(env, args)),
+  );
+
+  server.tool(
     "ebay_create_offer",
     "Create an eBay offer for an existing inventory SKU. Publishing is a separate explicit step.",
     {
@@ -2549,6 +2578,101 @@ async function ebayGetSellingListings(env: Env, args: {
   };
 }
 
+async function ebayGetListingDetail(env: Env, args: {
+  item_id: string;
+  connection_id?: string;
+}) {
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Version>1227</Version>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <IncludeItemSpecifics>true</IncludeItemSpecifics>
+  <IncludeWatchCount>true</IncludeWatchCount>
+  <ItemID>${escapeXml(args.item_id)}</ItemID>
+</GetItemRequest>`;
+  const response = await ebayTradingApiFetch(env, args.connection_id, "GetItem", xml);
+  const responseText = await response.text();
+  const ack = xmlText(responseText, "Ack");
+  const itemXml = xmlBlock(responseText, "Item");
+  return {
+    status: response.status,
+    ok: response.ok && ["Success", "Warning"].includes(ack),
+    ack,
+    errors: parseTradingErrors(responseText),
+    item: itemXml ? parseTradingItemDetail(itemXml) : null,
+    raw_response_included: false,
+  };
+}
+
+async function ebayReviseListingCopy(env: Env, args: {
+  item_id: string;
+  title?: string;
+  description?: string;
+  listing_policies?: {
+    fulfillmentPolicyId?: string;
+    paymentPolicyId?: string;
+    returnPolicyId?: string;
+  };
+  preserve_existing_policies?: boolean;
+  apply_immediately?: boolean;
+  connection_id?: string;
+}) {
+  if (!args.title && !args.description) {
+    return { error: "Nothing to revise.", requires: ["title or description"] };
+  }
+  const title = args.title?.trim();
+  if (title && title.length > 80) {
+    return { error: "eBay titles must be 80 characters or fewer.", title_length: title.length };
+  }
+  const listingPolicies = args.listing_policies ?? (args.preserve_existing_policies !== false
+    ? await ebayCurrentListingPolicies(env, args.item_id, args.connection_id)
+    : undefined);
+  const itemXml = `<Item>
+    <ItemID>${escapeXml(args.item_id)}</ItemID>
+    ${title ? `<Title>${escapeXml(title)}</Title>` : ""}
+    ${args.description ? `<Description><![CDATA[${cdataSafe(args.description)}]]></Description>` : ""}
+    ${tradingSellerProfilesXml(listingPolicies)}
+  </Item>`;
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Version>1227</Version>
+  ${itemXml}
+</ReviseItemRequest>`;
+  if (!args.apply_immediately) {
+    return {
+      preview: true,
+      item_id: args.item_id,
+      title: title ?? null,
+      description_length: args.description?.length ?? null,
+      listing_policies: listingPolicies ?? null,
+      note: "Set apply_immediately=true to send this ReviseItem request to eBay.",
+    };
+  }
+  const response = await ebayTradingApiFetch(env, args.connection_id, "ReviseItem", xml);
+  const responseText = await response.text();
+  const ack = xmlText(responseText, "Ack");
+  return {
+    preview: false,
+    status: response.status,
+    ok: response.ok && ["Success", "Warning"].includes(ack),
+    ack,
+    item_id: xmlText(responseText, "ItemID") || args.item_id,
+    start_time: xmlText(responseText, "StartTime") || null,
+    end_time: xmlText(responseText, "EndTime") || null,
+    fees: parseTradingFees(responseText),
+    errors: parseTradingErrors(responseText),
+  };
+}
+
+async function ebayCurrentListingPolicies(env: Env, itemId: string, connectionId?: string) {
+  const detail = await ebayGetListingDetail(env, { item_id: itemId, connection_id: connectionId });
+  return objectValue(detail.item)?.seller_profiles as {
+    fulfillmentPolicyId?: string;
+    paymentPolicyId?: string;
+    returnPolicyId?: string;
+  } | undefined;
+}
+
 async function ebayCreateOffer(env: Env, args: {
   sku: string;
   marketplace_id?: string;
@@ -4009,12 +4133,7 @@ function myEbaySellingListXml(name: string, include: boolean, entriesPerPage: nu
 function parseMyEbaySellingResponse(xml: string) {
   return {
     ack: xmlText(xml, "Ack"),
-    errors: xmlBlocks(xml, "Errors").map((block) => ({
-      severity: xmlText(block, "SeverityCode"),
-      code: xmlText(block, "ErrorCode"),
-      short_message: xmlText(block, "ShortMessage"),
-      long_message: xmlText(block, "LongMessage"),
-    })),
+    errors: parseTradingErrors(xml),
     summary: {
       active_count: xmlNumber(xmlBlock(xml, "Summary"), "ActiveCount"),
       sold_count: xmlNumber(xmlBlock(xml, "Summary"), "SoldCount"),
@@ -4062,6 +4181,86 @@ function parseTradingItem(itemXml: string) {
     condition: xmlText(xmlBlock(itemXml, "ConditionDisplayName"), "ConditionDisplayName") || xmlText(itemXml, "ConditionDisplayName") || null,
     gallery_url: xmlText(itemXml, "GalleryURL") || null,
   };
+}
+
+function parseTradingItemDetail(itemXml: string) {
+  const base = parseTradingItem(itemXml);
+  const primaryCategory = xmlBlock(itemXml, "PrimaryCategory");
+  const pictureDetails = xmlBlock(itemXml, "PictureDetails");
+  const sellingStatus = xmlBlock(itemXml, "SellingStatus");
+  return {
+    ...base,
+    subtitle: xmlText(itemXml, "SubTitle") || null,
+    description: xmlTextPreserve(itemXml, "Description"),
+    category: {
+      id: xmlText(primaryCategory, "CategoryID") || null,
+      name: xmlText(primaryCategory, "CategoryName") || null,
+    },
+    watch_count: xmlNumber(itemXml, "WatchCount"),
+    view_count: xmlNumber(itemXml, "HitCount"),
+    bid_count: xmlNumber(sellingStatus, "BidCount"),
+    item_specifics: parseNameValueList(xmlBlock(itemXml, "ItemSpecifics")),
+    seller_profiles: parseTradingSellerProfiles(xmlBlock(itemXml, "SellerProfiles")),
+    picture_urls: xmlBlocks(pictureDetails, "PictureURL").map((block) => decodeHtml(cdata(stripTags(block))).trim()).filter(Boolean),
+    condition_id: xmlText(itemXml, "ConditionID") || null,
+    payment_methods: xmlBlocks(itemXml, "PaymentMethods").map((block) => decodeHtml(cdata(stripTags(block))).trim()).filter(Boolean),
+    location: xmlText(itemXml, "Location") || null,
+    postal_code: xmlText(itemXml, "PostalCode") || null,
+    country: xmlText(itemXml, "Country") || null,
+    shipping_details_present: Boolean(xmlBlock(itemXml, "ShippingDetails")),
+    return_policy_present: Boolean(xmlBlock(itemXml, "ReturnPolicy")),
+  };
+}
+
+function parseNameValueList(xml: string) {
+  return xmlBlocks(xml, "NameValueList").map((block) => ({
+    name: xmlText(block, "Name"),
+    values: xmlBlocks(block, "Value").map((value) => decodeHtml(cdata(stripTags(value))).trim()).filter(Boolean),
+  })).filter((specific) => specific.name);
+}
+
+function parseTradingSellerProfiles(xml: string) {
+  if (!xml) return null;
+  return {
+    paymentPolicyId: xmlText(xmlBlock(xml, "SellerPaymentProfile"), "PaymentProfileID") || undefined,
+    paymentProfileName: xmlText(xmlBlock(xml, "SellerPaymentProfile"), "PaymentProfileName") || undefined,
+    returnPolicyId: xmlText(xmlBlock(xml, "SellerReturnProfile"), "ReturnProfileID") || undefined,
+    returnProfileName: xmlText(xmlBlock(xml, "SellerReturnProfile"), "ReturnProfileName") || undefined,
+    fulfillmentPolicyId: xmlText(xmlBlock(xml, "SellerShippingProfile"), "ShippingProfileID") || undefined,
+    fulfillmentProfileName: xmlText(xmlBlock(xml, "SellerShippingProfile"), "ShippingProfileName") || undefined,
+  };
+}
+
+function tradingSellerProfilesXml(policies?: {
+  fulfillmentPolicyId?: string;
+  paymentPolicyId?: string;
+  returnPolicyId?: string;
+} | null): string {
+  if (!policies?.fulfillmentPolicyId && !policies?.paymentPolicyId && !policies?.returnPolicyId) return "";
+  return `<SellerProfiles>
+    ${policies.paymentPolicyId ? `<SellerPaymentProfile><PaymentProfileID>${escapeXml(policies.paymentPolicyId)}</PaymentProfileID></SellerPaymentProfile>` : ""}
+    ${policies.returnPolicyId ? `<SellerReturnProfile><ReturnProfileID>${escapeXml(policies.returnPolicyId)}</ReturnProfileID></SellerReturnProfile>` : ""}
+    ${policies.fulfillmentPolicyId ? `<SellerShippingProfile><ShippingProfileID>${escapeXml(policies.fulfillmentPolicyId)}</ShippingProfileID></SellerShippingProfile>` : ""}
+  </SellerProfiles>`;
+}
+
+function parseTradingErrors(xml: string) {
+  return xmlBlocks(xml, "Errors").map((block) => ({
+    severity: xmlText(block, "SeverityCode"),
+    code: xmlText(block, "ErrorCode"),
+    short_message: xmlText(block, "ShortMessage"),
+    long_message: xmlText(block, "LongMessage"),
+  }));
+}
+
+function parseTradingFees(xml: string) {
+  return xmlBlocks(xmlBlock(xml, "Fees"), "Fee").map((block) => ({
+    name: xmlText(block, "Name"),
+    fee: {
+      value: xmlNumber(block, "Fee"),
+      currency: xmlAttribute(xmlTag(block, "Fee"), "currencyID") || "USD",
+    },
+  })).filter((fee) => fee.name);
 }
 
 async function timedFetch(env: Env, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -4117,6 +4316,10 @@ function xmlText(xml: string, tag: string): string {
   return decodeHtml(cdata(stripTags(xmlBlock(xml, tag)))).trim();
 }
 
+function xmlTextPreserve(xml: string, tag: string): string {
+  return decodeHtml(cdata(xmlBlock(xml, tag))).trim();
+}
+
 function xmlNumber(xml: string, tag: string): number | null {
   const value = Number.parseFloat(xmlText(xml, tag));
   return Number.isFinite(value) ? value : null;
@@ -4137,6 +4340,19 @@ function stripTags(value: string): string {
 
 function cdata(value: string): string {
   return value.replace(/^<!\[CDATA\[/, "").replace(/\]\]>$/, "");
+}
+
+function cdataSafe(value: string): string {
+  return value.replace(/\]\]>/g, "]]]]><![CDATA[>");
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 function decodeHtml(value: string): string {

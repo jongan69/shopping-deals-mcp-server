@@ -53,6 +53,8 @@ It is built for agents that need to answer questions like:
 | `ebay_get_inventory_items` | List Inventory API items for the connected seller account. |
 | `ebay_get_offers` | List Inventory API offers for a specific connected seller SKU. |
 | `ebay_get_selling_listings` | List active My eBay selling listings using the Trading API, including listings not created by this MCP. |
+| `ebay_get_listing_detail` | Fetch detailed title, description, category, photos, item specifics, and selling status for one listing. |
+| `ebay_revise_listing_copy` | Preview or apply live eBay title/description revisions through Trading API. |
 | `ebay_create_offer` | Create an eBay offer for a SKU without publishing it. |
 | `ebay_publish_offer` | Publish an offer as a live eBay listing. |
 | `ebay_create_listing_workflow` | Create inventory, create an offer, and optionally publish after explicit approval. |
