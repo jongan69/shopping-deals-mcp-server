@@ -50,6 +50,9 @@ It is built for agents that need to answer questions like:
 | `ebay_create_default_seller_policies` | Create or reuse default payment, return, and USPS Priority shipping policies. |
 | `ebay_create_inventory_location` | Create the inventory location required before publishing listings. |
 | `ebay_upsert_inventory_item` | Create or update an eBay Inventory API SKU with title, description, photos, aspects, quantity, and videos. |
+| `ebay_get_inventory_items` | List Inventory API items for the connected seller account. |
+| `ebay_get_offers` | List Inventory API offers for a specific connected seller SKU. |
+| `ebay_get_selling_listings` | List active My eBay selling listings using the Trading API, including listings not created by this MCP. |
 | `ebay_create_offer` | Create an eBay offer for a SKU without publishing it. |
 | `ebay_publish_offer` | Publish an offer as a live eBay listing. |
 | `ebay_create_listing_workflow` | Create inventory, create an offer, and optionally publish after explicit approval. |

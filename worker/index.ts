@@ -649,6 +649,46 @@ function createServer(env: Env) {
   );
 
   server.tool(
+    "ebay_get_inventory_items",
+    "List eBay Inventory API items for the connected seller. This usually shows API-managed SKUs.",
+    {
+      limit: z.number().int().positive().max(200).default(50),
+      offset: z.number().int().nonnegative().default(0),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetInventoryItems(env, args)),
+  );
+
+  server.tool(
+    "ebay_get_offers",
+    "List eBay Inventory API offers for a connected seller SKU.",
+    {
+      limit: z.number().int().positive().max(200).default(50),
+      offset: z.number().int().nonnegative().default(0),
+      sku: z.string().optional(),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetOffers(env, args)),
+  );
+
+  server.tool(
+    "ebay_get_selling_listings",
+    "List active eBay selling listings from the authenticated seller's My eBay Selling account.",
+    {
+      entries_per_page: z.number().int().positive().max(200).default(50),
+      page_number: z.number().int().positive().default(1),
+      include_active: z.boolean().default(true),
+      include_sold: z.boolean().default(false),
+      include_unsold: z.boolean().default(false),
+      include_scheduled: z.boolean().default(false),
+      connection_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayGetSellingListings(env, args)),
+  );
+
+  server.tool(
     "ebay_create_offer",
     "Create an eBay offer for an existing inventory SKU. Publishing is a separate explicit step.",
     {
@@ -2407,6 +2447,108 @@ async function ebayUpsertInventoryItem(env: Env, args: {
   };
 }
 
+async function ebayGetInventoryItems(env: Env, args: {
+  limit?: number;
+  offset?: number;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const params = new URLSearchParams({
+    limit: String(args.limit ?? 50),
+    offset: String(args.offset ?? 0),
+  });
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/sell/inventory/v1/inventory_item?${params}`,
+    { method: "GET" },
+    marketplaceId,
+  );
+  return {
+    status: response.status,
+    ok: response.ok,
+    response: await responseTextOrJson(response),
+  };
+}
+
+async function ebayGetOffers(env: Env, args: {
+  limit?: number;
+  offset?: number;
+  sku?: string;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  if (!args.sku) {
+    return {
+      error: "SKU is required for eBay Inventory API getOffers.",
+      note: "Use ebay_get_selling_listings to see active listings that were created outside this MCP or without Inventory API SKUs.",
+      requires: ["sku"],
+    };
+  }
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const params = new URLSearchParams({
+    limit: String(args.limit ?? 50),
+    offset: String(args.offset ?? 0),
+    marketplace_id: marketplaceId,
+  });
+  params.set("sku", args.sku);
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    `/sell/inventory/v1/offer?${params}`,
+    { method: "GET" },
+    marketplaceId,
+  );
+  return {
+    status: response.status,
+    ok: response.ok,
+    response: await responseTextOrJson(response),
+  };
+}
+
+async function ebayGetSellingListings(env: Env, args: {
+  entries_per_page?: number;
+  page_number?: number;
+  include_active?: boolean;
+  include_sold?: boolean;
+  include_unsold?: boolean;
+  include_scheduled?: boolean;
+  connection_id?: string;
+}) {
+  const entriesPerPage = clamp(args.entries_per_page ?? 50, 1, 200);
+  const pageNumber = Math.max(args.page_number ?? 1, 1);
+  const includeActive = args.include_active ?? true;
+  const includeSold = args.include_sold ?? false;
+  const includeUnsold = args.include_unsold ?? false;
+  const includeScheduled = args.include_scheduled ?? false;
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Version>1227</Version>
+  <DetailLevel>ReturnAll</DetailLevel>
+  ${myEbaySellingListXml("ActiveList", includeActive, entriesPerPage, pageNumber)}
+  ${myEbaySellingListXml("SoldList", includeSold, entriesPerPage, pageNumber)}
+  ${myEbaySellingListXml("UnsoldList", includeUnsold, entriesPerPage, pageNumber)}
+  ${myEbaySellingListXml("ScheduledList", includeScheduled, entriesPerPage, pageNumber)}
+  <SellingSummary><Include>true</Include></SellingSummary>
+</GetMyeBaySellingRequest>`;
+  const response = await ebayTradingApiFetch(env, args.connection_id, "GetMyeBaySelling", xml);
+  const responseText = await response.text();
+  const parsed = parseMyEbaySellingResponse(responseText);
+  return {
+    status: response.status,
+    ok: response.ok && ["Success", "Warning"].includes(parsed.ack),
+    ack: parsed.ack,
+    errors: parsed.errors,
+    summary: parsed.summary,
+    active_listings: parsed.active_listings,
+    sold_listings: parsed.sold_listings,
+    unsold_listings: parsed.unsold_listings,
+    scheduled_listings: parsed.scheduled_listings,
+    raw_response_included: false,
+  };
+}
+
 async function ebayCreateOffer(env: Env, args: {
   sku: string;
   marketplace_id?: string;
@@ -3206,9 +3348,34 @@ async function ebaySellerApiFetch(
   headers.set("Accept", "application/json");
   if (!headers.has("Content-Type") && init.body !== undefined) headers.set("Content-Type", "application/json");
   if (marketplaceId) headers.set("X-EBAY-C-MARKETPLACE-ID", marketplaceId);
-  const response = await timedFetch(env, `${ebayApiBase(env)}${path}`, { ...init, headers });
+  const base = path.startsWith("/commerce/identity/") ? ebayIdentityApiBase(env) : ebayApiBase(env);
+  const response = await timedFetch(env, `${base}${path}`, { ...init, headers });
   if (!response.ok && response.status >= 500) {
     throw new Error(`eBay API failed: HTTP ${response.status}`);
+  }
+  return response;
+}
+
+async function ebayTradingApiFetch(
+  env: Env,
+  connectionId: string | undefined,
+  callName: string,
+  body: string,
+): Promise<Response> {
+  const token = await ebaySellerAccessToken(env, connectionId);
+  const response = await timedFetch(env, ebayTradingApiUrl(env), {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/xml",
+      "X-EBAY-API-CALL-NAME": callName,
+      "X-EBAY-API-COMPATIBILITY-LEVEL": "1227",
+      "X-EBAY-API-SITEID": "0",
+      "X-EBAY-API-IAF-TOKEN": token,
+    },
+    body,
+  });
+  if (!response.ok && response.status >= 500) {
+    throw new Error(`eBay Trading API failed: HTTP ${response.status}`);
   }
   return response;
 }
@@ -3703,6 +3870,14 @@ function ebayApiBase(env: Env): string {
   return boolEnv(env.EBAY_USE_SANDBOX, false) ? "https://api.sandbox.ebay.com" : "https://api.ebay.com";
 }
 
+function ebayIdentityApiBase(env: Env): string {
+  return boolEnv(env.EBAY_USE_SANDBOX, false) ? "https://apiz.sandbox.ebay.com" : "https://apiz.ebay.com";
+}
+
+function ebayTradingApiUrl(env: Env): string {
+  return boolEnv(env.EBAY_USE_SANDBOX, false) ? "https://api.sandbox.ebay.com/ws/api.dll" : "https://api.ebay.com/ws/api.dll";
+}
+
 function ebayAuthUrl(env: Env): string {
   return boolEnv(env.EBAY_USE_SANDBOX, false) ? "https://auth.sandbox.ebay.com/oauth2/authorize" : "https://auth.ebay.com/oauth2/authorize";
 }
@@ -3820,6 +3995,75 @@ function facebookHeaders(): Record<string, string> {
   };
 }
 
+function myEbaySellingListXml(name: string, include: boolean, entriesPerPage: number, pageNumber: number): string {
+  if (!include) return `<${name}><Include>false</Include></${name}>`;
+  return `<${name}>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+      <PageNumber>${pageNumber}</PageNumber>
+    </Pagination>
+  </${name}>`;
+}
+
+function parseMyEbaySellingResponse(xml: string) {
+  return {
+    ack: xmlText(xml, "Ack"),
+    errors: xmlBlocks(xml, "Errors").map((block) => ({
+      severity: xmlText(block, "SeverityCode"),
+      code: xmlText(block, "ErrorCode"),
+      short_message: xmlText(block, "ShortMessage"),
+      long_message: xmlText(block, "LongMessage"),
+    })),
+    summary: {
+      active_count: xmlNumber(xmlBlock(xml, "Summary"), "ActiveCount"),
+      sold_count: xmlNumber(xmlBlock(xml, "Summary"), "SoldCount"),
+      unsold_count: xmlNumber(xmlBlock(xml, "Summary"), "UnsoldCount"),
+      total_selling_count: xmlNumber(xmlBlock(xml, "SellingSummary"), "TotalSellingCount"),
+    },
+    active_listings: parseMyEbaySellingList(xml, "ActiveList"),
+    sold_listings: parseMyEbaySellingList(xml, "SoldList"),
+    unsold_listings: parseMyEbaySellingList(xml, "UnsoldList"),
+    scheduled_listings: parseMyEbaySellingList(xml, "ScheduledList"),
+  };
+}
+
+function parseMyEbaySellingList(xml: string, listName: string) {
+  const listXml = xmlBlock(xml, listName);
+  return {
+    total: xmlNumber(xmlBlock(listXml, "PaginationResult"), "TotalNumberOfEntries"),
+    page_number: xmlNumber(listXml, "PageNumber"),
+    entries_per_page: xmlNumber(listXml, "EntriesPerPage"),
+    items: xmlBlocks(listXml, "Item").map(parseTradingItem),
+  };
+}
+
+function parseTradingItem(itemXml: string) {
+  const listingDetails = xmlBlock(itemXml, "ListingDetails");
+  const sellingStatus = xmlBlock(itemXml, "SellingStatus");
+  const currentPriceTag = xmlTag(itemXml, "CurrentPrice") || xmlTag(sellingStatus, "CurrentPrice");
+  const currentPrice = currentPriceTag ? Number.parseFloat(decodeHtml(stripTags(currentPriceTag))) : null;
+  return {
+    item_id: xmlText(itemXml, "ItemID"),
+    sku: xmlText(itemXml, "SKU") || null,
+    title: xmlText(itemXml, "Title"),
+    url: xmlText(listingDetails, "ViewItemURL") || xmlText(listingDetails, "ViewItemURLForNaturalSearch") || null,
+    listing_status: xmlText(sellingStatus, "ListingStatus") || xmlText(itemXml, "SellingState") || null,
+    listing_type: xmlText(itemXml, "ListingType") || null,
+    quantity: xmlNumber(itemXml, "Quantity"),
+    quantity_sold: xmlNumber(sellingStatus, "QuantitySold"),
+    price: {
+      value: currentPrice !== null && Number.isFinite(currentPrice) ? currentPrice : null,
+      currency: currentPriceTag ? xmlAttribute(currentPriceTag, "currencyID") || "USD" : "USD",
+    },
+    start_time: xmlText(listingDetails, "StartTime") || null,
+    end_time: xmlText(listingDetails, "EndTime") || null,
+    time_left: xmlText(itemXml, "TimeLeft") || null,
+    condition: xmlText(xmlBlock(itemXml, "ConditionDisplayName"), "ConditionDisplayName") || xmlText(itemXml, "ConditionDisplayName") || null,
+    gallery_url: xmlText(itemXml, "GalleryURL") || null,
+  };
+}
+
 async function timedFetch(env: Env, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const timeout = intEnv(env.SHOPPING_HTTP_TIMEOUT_SECONDS, 15) * 1000;
   const controller = new AbortController();
@@ -3852,6 +4096,39 @@ function boolEnv(value: string | undefined, fallback: boolean): boolean {
 
 function match(text: string, pattern: RegExp): string {
   return text.match(pattern)?.[1] ?? "";
+}
+
+function xmlBlock(xml: string, tag: string): string {
+  const escapedTag = escapeRegExp(tag);
+  return xml.match(new RegExp(`<${escapedTag}(?:\\s[^>]*)?>([\\s\\S]*?)</${escapedTag}>`))?.[1] ?? "";
+}
+
+function xmlBlocks(xml: string, tag: string): string[] {
+  const escapedTag = escapeRegExp(tag);
+  return [...xml.matchAll(new RegExp(`<${escapedTag}(?:\\s[^>]*)?>([\\s\\S]*?)</${escapedTag}>`, "g"))].map((entry) => entry[1] ?? "");
+}
+
+function xmlTag(xml: string, tag: string): string {
+  const escapedTag = escapeRegExp(tag);
+  return xml.match(new RegExp(`<${escapedTag}(?:\\s[^>]*)?>[\\s\\S]*?</${escapedTag}>`))?.[0] ?? "";
+}
+
+function xmlText(xml: string, tag: string): string {
+  return decodeHtml(cdata(stripTags(xmlBlock(xml, tag)))).trim();
+}
+
+function xmlNumber(xml: string, tag: string): number | null {
+  const value = Number.parseFloat(xmlText(xml, tag));
+  return Number.isFinite(value) ? value : null;
+}
+
+function xmlAttribute(xmlTagText: string, attribute: string): string {
+  const escapedAttribute = escapeRegExp(attribute);
+  return decodeHtml(xmlTagText.match(new RegExp(`${escapedAttribute}="([^"]*)"`))?.[1] ?? "");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function stripTags(value: string): string {
