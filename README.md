@@ -46,6 +46,8 @@ It is built for agents that need to answer questions like:
 | `ebay_exchange_seller_code` | Exchange an eBay authorization code and store the seller refresh token in Worker KV. |
 | `ebay_seller_connection_status` | Check seller-token configuration and retrieve the connected eBay user profile when possible. |
 | `ebay_get_seller_policies` | Fetch seller business policies, inventory locations, and account readiness. |
+| `ebay_create_seller_policy` | Create a specific eBay payment, return, or fulfillment policy from an Account API payload. |
+| `ebay_create_default_seller_policies` | Create or reuse default payment, return, and USPS Priority shipping policies. |
 | `ebay_create_inventory_location` | Create the inventory location required before publishing listings. |
 | `ebay_upsert_inventory_item` | Create or update an eBay Inventory API SKU with title, description, photos, aspects, quantity, and videos. |
 | `ebay_create_offer` | Create an eBay offer for a SKU without publishing it. |
@@ -303,6 +305,7 @@ Recommended connection flow:
 4. Call `ebay_exchange_seller_code` with that code.
 5. Call `ebay_seller_connection_status`.
 6. Call `ebay_get_seller_policies` to retrieve fulfillment/payment/return policies and inventory locations.
+7. If the account has no policies yet, call `ebay_create_default_seller_policies`. The helper reuses existing policies when possible and handles eBay duplicate-policy responses as reuse.
 
 Before publishing, the seller account must have:
 

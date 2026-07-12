@@ -576,6 +576,38 @@ function createServer(env: Env) {
   );
 
   server.tool(
+    "ebay_create_seller_policy",
+    "Create one eBay seller business policy from an explicit Account API payload.",
+    {
+      policy_type: z.enum(["payment", "return", "fulfillment"]),
+      payload: z.record(z.string(), z.unknown()),
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+    },
+    async (args) => toolText(await ebayCreateSellerPolicy(env, args)),
+  );
+
+  server.tool(
+    "ebay_create_default_seller_policies",
+    "Create default payment, return, and shipping business policies for normal non-vehicle eBay listings.",
+    {
+      connection_id: z.string().optional(),
+      marketplace_id: z.string().optional(),
+      currency: z.string().default("USD"),
+      payment_policy_name: z.string().default("MCP Immediate Payment"),
+      return_policy_name: z.string().default("MCP 30 Day Buyer Paid Returns"),
+      fulfillment_policy_name: z.string().default("MCP USPS Priority Free Shipping"),
+      handling_days: z.number().int().nonnegative().default(1),
+      domestic_shipping_service: z.string().default("USPSPriority"),
+      domestic_shipping_carrier: z.string().default("USPS"),
+      domestic_shipping_cost: z.number().nonnegative().default(0),
+      return_days: z.number().int().positive().default(30),
+      return_shipping_cost_payer: z.string().default("BUYER"),
+    },
+    async (args) => toolText(await ebayCreateDefaultSellerPolicies(env, args)),
+  );
+
+  server.tool(
     "ebay_create_inventory_location",
     "Create or replace an eBay inventory location required before publishing offers.",
     {
@@ -1019,6 +1051,21 @@ export default {
         },
       });
     }
+    if (url.pathname === "/privacy" || url.pathname === "/terms") {
+      return new Response(publicPolicyPage(url.origin), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+    if (url.pathname === "/ebay/oauth/callback") {
+      return new Response(ebayOauthCallbackPage(url), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+    if (url.pathname === "/ebay/oauth/rejected") {
+      return new Response(ebayOauthRejectedPage(url.origin), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
 
     const server = createServer(env);
     return createMcpHandler(server, {
@@ -1078,6 +1125,73 @@ function listSources(env: Env) {
       notes: "Public HTML parser. Amazon may block automated requests.",
     },
   ];
+}
+
+function publicPolicyPage(origin: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shopping Deals MCP Privacy and Terms</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; max-width: 760px; margin: 40px auto; padding: 0 20px; color: #17202a; }
+    h1 { font-size: 28px; }
+    h2 { font-size: 18px; margin-top: 28px; }
+    code { background: #f3f5f7; padding: 2px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Shopping Deals MCP Privacy and Terms</h1>
+  <p>Shopping Deals MCP is an operator-controlled automation endpoint for product research, resale workflow tracking, and eBay seller-account actions authorized by the connected seller.</p>
+  <h2>Data Use</h2>
+  <p>The service uses eBay OAuth tokens only to perform actions requested by the connected seller, such as reading seller policies, creating listings, checking orders, and adding shipment tracking. Seller refresh tokens are stored in the configured Cloudflare KV namespace for this Worker deployment.</p>
+  <h2>Data Sharing</h2>
+  <p>The service does not sell personal data. Data is sent to eBay APIs and configured marketplace/search providers only as needed to perform requested actions.</p>
+  <h2>Seller Responsibility</h2>
+  <p>Connected sellers remain responsible for eBay policy compliance, accurate listing descriptions, lawful goods, fulfillment, returns, taxes, and buyer communications.</p>
+  <h2>Contact</h2>
+  <p>Repository: <a href="https://github.com/jongan69/shopping-deals-mcp-server">github.com/jongan69/shopping-deals-mcp-server</a></p>
+  <p>Service health: <a href="${origin}/health">${origin}/health</a></p>
+</body>
+</html>`;
+}
+
+function ebayOauthCallbackPage(url: URL): string {
+  const code = url.searchParams.get("code") ?? "";
+  const error = url.searchParams.get("error") ?? "";
+  const state = url.searchParams.get("state") ?? "";
+  const escapedCode = escapeHtml(code);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>eBay OAuth Connected</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; max-width: 760px; margin: 40px auto; padding: 0 20px; color: #17202a; }
+    textarea { width: 100%; min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    code { background: #f3f5f7; padding: 2px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>${error ? "eBay OAuth Error" : "eBay OAuth Code Received"}</h1>
+  ${error ? `<p>Error: <code>${escapeHtml(error)}</code></p>` : `<p>Copy this authorization code into the MCP tool <code>ebay_exchange_seller_code</code>.</p><textarea readonly>${escapedCode}</textarea>`}
+  ${state ? `<p>State: <code>${escapeHtml(state)}</code></p>` : ""}
+</body>
+</html>`;
+}
+
+function ebayOauthRejectedPage(origin: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>eBay OAuth Declined</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.55;max-width:760px;margin:40px auto;padding:0 20px;color:#17202a">
+  <h1>eBay OAuth Declined</h1>
+  <p>No seller token was created. You can restart from the MCP endpoint when ready.</p>
+  <p><a href="${origin}/health">Service health</a></p>
+</body>
+</html>`;
 }
 
 async function searchProducts(
@@ -2025,6 +2139,192 @@ async function ebayGetSellerPolicies(env: Env, args: { connection_id?: string; m
       has_return_policy: Array.isArray(objectValue(returnPolicies)?.returnPolicies) && (objectValue(returnPolicies)?.returnPolicies as unknown[]).length > 0,
       has_inventory_location: Array.isArray(objectValue(locations)?.locations) && (objectValue(locations)?.locations as unknown[]).length > 0,
     },
+  };
+}
+
+async function ebayCreateSellerPolicy(env: Env, args: {
+  policy_type: "payment" | "return" | "fulfillment";
+  payload: Record<string, unknown>;
+  connection_id?: string;
+  marketplace_id?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? String(args.payload.marketplaceId ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US");
+  const path = args.policy_type === "payment"
+    ? "/sell/account/v1/payment_policy"
+    : args.policy_type === "return"
+      ? "/sell/account/v1/return_policy"
+      : "/sell/account/v1/fulfillment_policy";
+  const payload = { marketplaceId, ...args.payload };
+  const response = await ebaySellerApiFetch(
+    env,
+    args.connection_id,
+    path,
+    { method: "POST", body: JSON.stringify(payload) },
+    marketplaceId,
+  );
+  const body = await responseTextOrJson(response);
+  const duplicatePolicyId = extractDuplicatePolicyId(body);
+  return {
+    policy_type: args.policy_type,
+    status: response.status,
+    ok: response.ok || Boolean(duplicatePolicyId),
+    reused: response.ok ? undefined : Boolean(duplicatePolicyId),
+    location: response.headers.get("Location"),
+    policy_id: duplicatePolicyId ?? objectValue(body)?.paymentPolicyId ?? objectValue(body)?.returnPolicyId ?? objectValue(body)?.fulfillmentPolicyId ?? locationId(response.headers.get("Location")),
+    payload,
+    response: body,
+  };
+}
+
+function findSellerPolicyByName(policies: unknown, collectionKey: string, name: string): Record<string, unknown> | null {
+  const collection = objectValue(policies)?.[collectionKey];
+  if (!Array.isArray(collection)) return null;
+  const normalizedName = name.trim().toLowerCase();
+  return collection
+    .map((policy) => objectValue(policy))
+    .find((policy) => typeof policy?.name === "string" && policy.name.trim().toLowerCase() === normalizedName) ?? null;
+}
+
+function firstSellerPolicy(policies: unknown, collectionKey: string): Record<string, unknown> | null {
+  const collection = objectValue(policies)?.[collectionKey];
+  if (!Array.isArray(collection)) return null;
+  return collection.map((policy) => objectValue(policy)).find(Boolean) ?? null;
+}
+
+function extractDuplicatePolicyId(body: unknown): string | null {
+  const errors = objectValue(body)?.errors;
+  if (!Array.isArray(errors)) return null;
+  for (const error of errors) {
+    const parameters = objectValue(error)?.parameters;
+    if (!Array.isArray(parameters)) continue;
+    for (const parameter of parameters) {
+      const record = objectValue(parameter);
+      if (record?.name === "duplicatePolicyId" && typeof record.value === "string") return record.value;
+    }
+  }
+  return null;
+}
+
+async function ebayCreateDefaultSellerPolicies(env: Env, args: {
+  connection_id?: string;
+  marketplace_id?: string;
+  currency?: string;
+  payment_policy_name?: string;
+  return_policy_name?: string;
+  fulfillment_policy_name?: string;
+  handling_days?: number;
+  domestic_shipping_service?: string;
+  domestic_shipping_carrier?: string;
+  domestic_shipping_cost?: number;
+  return_days?: number;
+  return_shipping_cost_payer?: string;
+}) {
+  const marketplaceId = args.marketplace_id ?? env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
+  const currency = args.currency ?? "USD";
+  const categoryTypes = [{ name: "ALL_EXCLUDING_MOTORS_VEHICLES" }];
+  const paymentPolicyName = args.payment_policy_name ?? "MCP Immediate Payment";
+  const returnPolicyName = args.return_policy_name ?? "MCP 30 Day Buyer Paid Returns";
+  const fulfillmentPolicyName = args.fulfillment_policy_name ?? "MCP USPS Priority Free Shipping";
+  const currentPolicies = await ebayGetSellerPolicies(env, { connection_id: args.connection_id, marketplace_id: marketplaceId });
+  const existingPaymentPolicy = findSellerPolicyByName(currentPolicies.payment_policies, "paymentPolicies", paymentPolicyName)
+    ?? firstSellerPolicy(currentPolicies.payment_policies, "paymentPolicies");
+  const existingReturnPolicy = findSellerPolicyByName(currentPolicies.return_policies, "returnPolicies", returnPolicyName)
+    ?? firstSellerPolicy(currentPolicies.return_policies, "returnPolicies");
+  const existingFulfillmentPolicy = findSellerPolicyByName(currentPolicies.fulfillment_policies, "fulfillmentPolicies", fulfillmentPolicyName)
+    ?? firstSellerPolicy(currentPolicies.fulfillment_policies, "fulfillmentPolicies");
+  const created = {
+    payment: existingPaymentPolicy ? {
+      policy_type: "payment",
+      ok: true,
+      reused: true,
+      policy_id: existingPaymentPolicy.paymentPolicyId ?? null,
+      response: existingPaymentPolicy,
+    } : await ebayCreateSellerPolicy(env, {
+      policy_type: "payment",
+      connection_id: args.connection_id,
+      marketplace_id: marketplaceId,
+      payload: {
+        name: paymentPolicyName,
+        description: "Default payment policy created by Shopping Deals MCP.",
+        marketplaceId,
+        categoryTypes,
+        immediatePay: true,
+      },
+    }),
+    return: existingReturnPolicy ? {
+      policy_type: "return",
+      ok: true,
+      reused: true,
+      policy_id: existingReturnPolicy.returnPolicyId ?? null,
+      response: existingReturnPolicy,
+    } : await ebayCreateSellerPolicy(env, {
+      policy_type: "return",
+      connection_id: args.connection_id,
+      marketplace_id: marketplaceId,
+      payload: {
+        name: returnPolicyName,
+        description: "Default return policy created by Shopping Deals MCP.",
+        marketplaceId,
+        categoryTypes,
+        returnsAccepted: true,
+        refundMethod: "MONEY_BACK",
+        returnPeriod: {
+          value: args.return_days ?? 30,
+          unit: "DAY",
+        },
+        returnShippingCostPayer: args.return_shipping_cost_payer ?? "BUYER",
+      },
+    }),
+    fulfillment: existingFulfillmentPolicy ? {
+      policy_type: "fulfillment",
+      ok: true,
+      reused: true,
+      policy_id: existingFulfillmentPolicy.fulfillmentPolicyId ?? null,
+      response: existingFulfillmentPolicy,
+    } : await ebayCreateSellerPolicy(env, {
+      policy_type: "fulfillment",
+      connection_id: args.connection_id,
+      marketplace_id: marketplaceId,
+      payload: {
+        name: fulfillmentPolicyName,
+        description: "Default shipping policy created by Shopping Deals MCP.",
+        marketplaceId,
+        categoryTypes,
+        handlingTime: {
+          value: args.handling_days ?? 1,
+          unit: "DAY",
+        },
+        shippingOptions: [
+          {
+            optionType: "DOMESTIC",
+            costType: "FLAT_RATE",
+            handlingTime: {
+              value: String(args.handling_days ?? 1),
+              unit: "DAY",
+            },
+            shippingServices: [
+              {
+                sortOrder: 1,
+                shippingCarrierCode: args.domestic_shipping_carrier ?? "USPS",
+                shippingServiceCode: args.domestic_shipping_service ?? "USPSPriority",
+                shippingCost: {
+                  value: String(roundMoney(args.domestic_shipping_cost ?? 0)),
+                  currency,
+                },
+                buyerResponsibleForShipping: false,
+                freeShipping: roundMoney(args.domestic_shipping_cost ?? 0) === 0,
+              },
+            ],
+          },
+        ],
+        localPickup: false,
+      },
+    }),
+  };
+  return {
+    marketplace_id: marketplaceId,
+    created,
+    next_step: "Run ebay_get_seller_policies and use the returned policy IDs in ebay_create_offer or ebay_create_listing_workflow.",
   };
 }
 
@@ -3569,6 +3869,15 @@ function decodeHtml(value: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function clamp(value: number, low: number, high: number): number {
